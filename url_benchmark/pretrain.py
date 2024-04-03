@@ -83,15 +83,15 @@ class Config:
     custom_reward: tp.Optional[str] = None  # activates custom eval if not None
     final_tests: int = 10
     # checkpoint
-    # snapshot_at: tp.Tuple[int, ...] = (100000, 200000, 500000, 800000, 1000000, 1500000,
-    #                                    2000000, 3000000, 4000000, 5000000, 9000000, 10000000)
-    snapshot_at: tp.Tuple[int, ...] = (10000, 20000, 50000, 80000, 100000, 150000,
-                                       200000, 300000, 400000, 500000, 900000, 1000000)
-    checkpoint_every: int = 10000#100000
+    snapshot_at: tp.Tuple[int, ...] = (100000, 200000, 500000, 800000, 1000000, 1500000,
+                                       2000000, 3000000, 4000000, 5000000, 9000000, 10000000)
+    # snapshot_at: tp.Tuple[int, ...] = (10000, 20000, 50000, 80000, 100000, 150000,
+    #                                    200000, 300000, 400000, 500000, 900000, 1000000)
+    checkpoint_every: int = 100000#100000
     load_model: tp.Optional[str] = None
     # training
     num_seed_frames: int = 4000
-    replay_buffer_episodes: int = 100 #default 5000
+    replay_buffer_episodes: int = 500 #default 5000
     update_encoder: bool = True
     batch_size: int = omgcf.II("agent.batch_size")
 
@@ -101,7 +101,7 @@ class PretrainConfig(Config):
     # mode
     reward_free: bool = True
     # train settings
-    num_train_frames: int = 200010#2000010
+    num_train_frames: int = 2000010#2000010
     # snapshot
     eval_every_frames: int = 10000
     load_replay_buffer: tp.Optional[str] = None

@@ -38,3 +38,6 @@ pylint>=2.12.2
 tqdm
 nevergrad
 gitpython
+
+# for crowd navi
+shapely=2.0.3
