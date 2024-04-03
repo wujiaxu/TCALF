@@ -1,1 +1,1 @@
-# Toward Foundation model for social navigation: transferable collision aware latent feature learning via Disentangled representation of meta reinforcement learning (TCALF)
+# Learning adaptive navigation skill for mobile robot working in human-populated spaces
