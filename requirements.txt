@@ -8,6 +8,7 @@ scikit-learn
 pandas
 matplotlib
 moviepy
+mujoco==2.3.5
 mujoco_py #mujoco==2.3.5 need to fix mujoco version below to 3.0.0
 # git+https://github.com/deepmind/dm_control.git@644b3c6844cafd611cb2dfe82bc68bb6aed97292  # past this commit, it breaks
 dm-control==1.0.8  # let's keep it precise for now
