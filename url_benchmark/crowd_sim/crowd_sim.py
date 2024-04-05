@@ -377,7 +377,8 @@ class CrowdWorld(dm_env.Environment):
                 shape=(self._occu_map_size*3+6,), dtype=np.float32, name='observation_occupancy_flow')
 
     def action_spec(self):
-        return specs.Array(shape=(2,), dtype=np.float32, name='action')
+        return specs.BoundedArray(shape=(2,), dtype=np.float32, name='action', minimum=-1.0, maximum=1.0)
+    #specs.Array(shape=(2,), dtype=np.float32, name='action')
     
     def reset(self):
         self._num_episode_steps = 0
@@ -675,7 +676,7 @@ class CrowdWorld(dm_env.Environment):
                 while ii < n_laser:
                     lines.append(self.scan_intersection[ii])
                     ii = ii + 36
-                lc = mc.LineCollection(lines)
+                lc = mc.LineCollection(lines,linewidths=1,linestyles='--')
                 ax.add_artist(lc)
                 artists.append(lc)
             plt.pause(0.1)
