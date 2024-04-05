@@ -52,7 +52,7 @@ class FBDDPGAgentConfig:
     use_wandb: bool = omegaconf.II("use_wandb")  # ${use_wandb}
     use_hiplog: bool = omegaconf.II("use_hiplog")  # ${use_wandb}
     num_expl_steps: int = omegaconf.MISSING  # ???  # to be specified later
-    num_inference_steps: int = 5120
+    num_inference_steps: int = 10000#5120
     hidden_dim: int = 1024   # 128, 2048
     backward_hidden_dim: int = 526   # 512
     feature_dim: int = 512   # 128, 1024

@@ -250,8 +250,12 @@ class BaseWorkspace(tp.Generic[C]):
         self.eval_env = self._make_env()
         # TODO debug RuntimeError: mat1 and mat2 shapes cannot be multiplied (1024x4113 and 4114x1024) aps.critic
         # print(self.train_env.observation_spec(),self.train_env.action_spec())
+        # crowd navi
         #Array(shape=(4102,), dtype=dtype('float32'), name='observation_occupancy_map') 
         # Array(shape=(2,), dtype=dtype('float32'), name='action')
+        # walker
+        # Array(shape=(24,), dtype=dtype('float32'), name='observation') 
+        # BoundedArray(shape=(6,), dtype=dtype('float32'), name='action', minimum=-1.0, maximum=1.0)
         # create agent
         self.agent = make_agent(cfg.obs_type,
                                 self.train_env.observation_spec(),
