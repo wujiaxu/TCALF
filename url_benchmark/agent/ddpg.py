@@ -3,6 +3,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+from turtle import forward
 import typing as tp
 import dataclasses
 from typing import Any, Tuple
@@ -73,6 +74,44 @@ class Encoder(nn.Module):
         h = self.convnet(obs)
         h = h.view(h.shape[0], -1)
         return h
+    
+class CrowdEncoderOM(nn.Module): #TODO test
+    def __init__(self,obs_shape) -> None:
+        super().__init__()
+
+        assert len(obs_shape) == 1
+        self.h_om_dim = 32 * 25 * 25
+        self.r_state_dim = 6
+        self.repr_dim = 256
+
+        self.convnet = nn.Sequential(nn.Conv2d(1, 32, 3, stride=2),
+                                     nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
+                                     nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
+                                     nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
+                                     nn.ReLU())
+        self.trunch = nn.Sequential(nn.Linear(self.h_om_dim+self.r_state_dim, self.repr_dim),
+                                   nn.LayerNorm(self.repr_dim), nn.Tanh())
+        self.output = nn.Sequential(nn.Linear(self.repr_dim, self.repr_dim),
+                    nn.ReLU(inplace=True))
+
+        self.apply(utils.weight_init)
+
+    def forward(self, obs) -> Any:
+        om = obs[:,:-self.r_state_dim].view(obs.shape[0],1,64,64)
+        r_state = obs[:,-self.r_state_dim:]
+        om = om - 0.5
+        h = self.convnet(om)
+        h = h.view(h.shape[0], -1)
+        h = torch.cat([h, r_state], dim=-1)
+        h = self.trunch(h)
+        h = self.output(h)
+        return h
+
+class CrowdEncoderCOM(nn.Module):
+    def __init__(self,obs_shape) -> None:
+        pass
+    def forward(self,obs) -> Any:
+        raise NotImplementedError
 
 
 class Actor(nn.Module):
@@ -178,7 +217,11 @@ class DDPGAgent:
         # models
         if cfg.obs_type == 'pixels':
             self.aug: tp.Union[utils.RandomShiftsAug, nn.Identity] = utils.RandomShiftsAug(pad=4)
-            self.encoder: tp.Union[Encoder, nn.Identity] = Encoder(cfg.obs_shape).to(cfg.device)
+            self.encoder: tp.Union[Encoder, nn.Identity,CrowdEncoderOM] = Encoder(cfg.obs_shape).to(cfg.device)
+            self.obs_dim = self.encoder.repr_dim + meta_dim
+        elif cfg.obs_type == 'om':
+            self.aug = nn.Identity()
+            self.encoder = CrowdEncoderOM(cfg.obs_shape).to(cfg.device)
             self.obs_dim = self.encoder.repr_dim + meta_dim
         else:
             self.aug = nn.Identity()
@@ -198,6 +241,8 @@ class DDPGAgent:
 
         self.encoder_opt: tp.Optional[torch.optim.Adam] = None
         if cfg.obs_type == 'pixels':
+            self.encoder_opt = torch.optim.Adam(self.encoder.parameters(), lr=cfg.lr)
+        elif cfg.obs_type == 'om':
             self.encoder_opt = torch.optim.Adam(self.encoder.parameters(), lr=cfg.lr)
         self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=cfg.lr)
         self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=cfg.lr)

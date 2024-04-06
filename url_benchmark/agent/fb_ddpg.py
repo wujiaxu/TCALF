@@ -27,7 +27,7 @@ from url_benchmark.dmc import TimeStep
 from url_benchmark import goals as _goals
 from .ddpg import MetaDict
 from .fb_modules import IdentityMap
-from .ddpg import Encoder
+from .ddpg import Encoder,CrowdEncoderOM,CrowdEncoderCOM
 from .fb_modules import Actor, DiagGaussianActor, ForwardMap, BackwardMap, OnlineCov
 
 
@@ -103,6 +103,10 @@ class FBDDPGAgent:
             self.aug: nn.Module = utils.RandomShiftsAug(pad=4)
             self.encoder: nn.Module = Encoder(cfg.obs_shape).to(cfg.device)
             self.obs_dim = self.encoder.repr_dim
+        elif cfg.obs_type == 'om':
+            self.aug = nn.Identity()
+            self.encoder = CrowdEncoderOM(cfg.obs_shape).to(cfg.device)
+            self.obs_dim = self.encoder.repr_dim
         else:
             self.aug = nn.Identity()
             self.encoder = nn.Identity()
@@ -142,6 +146,8 @@ class FBDDPGAgent:
         # optimizers
         self.encoder_opt: tp.Optional[torch.optim.Adam] = None
         if cfg.obs_type == 'pixels':
+            self.encoder_opt = torch.optim.Adam(self.encoder.parameters(), lr=cfg.lr)
+        elif cfg.obs_type == 'om':
             self.encoder_opt = torch.optim.Adam(self.encoder.parameters(), lr=cfg.lr)
         self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=cfg.lr)
         # params = [p for net in [self.forward_net, self.backward_net] for p in net.parameters()]
