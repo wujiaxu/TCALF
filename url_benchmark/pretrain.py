@@ -539,6 +539,7 @@ class BaseWorkspace(tp.Generic[C]):
                 "cheetah": ['walk', 'walk_backward', 'run', 'run_backward'],
                 "quadruped": ['stand', 'walk', 'run', 'jump'],
                 "walker": ['stand', 'walk', 'run', 'flip'],
+                "crowdnavi":['PointGoalNavi','Tracking','PassLeftSide','PassRightSide','AwayFromHuman','LowSpeed'] #'FollowWall',
             }
             if self.domain not in domain_tasks:
                 return

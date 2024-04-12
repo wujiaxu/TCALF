@@ -61,14 +61,14 @@ logger = logging.getLogger(__name__)
 # """)
 # st.sidebar.write("The [code is open-source](https://github.com/facebookresearch/controllable_agent).")
 
-model_path = Path("/root/controllable_agent/url_benchmark/exp_local/2024.04.01/131258_aps_crowdnavi_PointGoalNavi_online/models/")
+model_path = Path("/home/dl/wu_ws/TCALF/url_benchmark/exp_local/2024.04.09/234316_aps_crowdnavi_PointGoalNavi_online/models")
 # if not model_path.exists():
 #     model_path = base / "models"
 
 # having more cases will trigger a dropdown box
 CASES = {
     # Update the following path to a checkpoint that exists in you system
-    "crowdnavi - 240401 (rnd init)": model_path / "latest.pt",
+    "crowdnavi - 240409 (rnd init)": model_path / "latest.pt",
 }
 CASES = {x: y for x, y in CASES.items() if y.exists()}
 # if len(CASES) > 1:
@@ -122,14 +122,16 @@ reward_texts = [
     ("AwayFromHuman", "AwayFromHuman"),
     ("LowSpeed","LowSpeed"),
 ]
-string = "LowSpeed"
+string = "PointGoalNavi"
 
 if string and string is not None:
     reward = goals.CrowdNaviReward(string)
     logger.info(f"Running reward: {string}")  # for the console
-
+    start = time.time()
     meta = pretrain._init_eval_meta(ws, custom_reward=reward)
-    print(meta)
+    end = time.time()
+
+    print("infer meta used: {} s".format(end-start))
     # play
     env = ws._make_env()
     time_step = env.reset()

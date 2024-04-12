@@ -27,7 +27,7 @@ from url_benchmark.crowd_sim.utils.obstacle import *
 import dm_env
 from dm_env import specs
 import enum
-from url_benchmark.dmc import ExtendedTimeStep
+from url_benchmark.dmc import ExtendedTimeStep,TimeStep
 
 DEBUG = True
 # laser scan parameters
@@ -48,6 +48,23 @@ class ObservationType(enum.IntEnum):
     RAW_SCAN = enum.auto()
     SEMANTIC_SCAN = enum.auto()
 
+class CrowdPhysics:
+
+    def __init__(self,env):
+        self._env = env
+    def get_state(self):
+        # get robot-crowd physics
+        physics = [1+len(self._env.humans)]
+        physics += list(self._env.robot.get_observable_state().to_tuple())
+        for human in self._env.humans:
+            physics += list(human.get_observable_state().to_tuple())
+        physics += (1+(1+self._env._human_num[1])*5-len(physics))*[-1]
+        return np.array(physics,dtype=np.float32)
+    def render(self, height,width,camera_id):
+        if self._env.render_axis is None:
+            self._env.config.env.render = False
+            self._env.init_render_ax(None)
+        return self._env.render(return_rgb=True)
 
 def build_crowdworld_task(task,phase,
                          discount=0.9,
@@ -133,13 +150,14 @@ class CrowdWorld(dm_env.Environment):
             raise ValueError('observation_type should be a ObservationType instace.')
         self.phase = phase
         self.config = config
+        self.physics = CrowdPhysics(self)
 
-        self._map_size = 8 #circle
+        self._map_size = 10 #circle
         self._layout = None
-        self._human_num = [1,10]
+        self._human_num = [1,6]
         self._time_step = 0.25
         self.robot = Robot(config,"robot")
-        self.humans = None
+        self.humans : list[Human] = []
         # #human_policy = 'orca'
         # self._centralized_planner = policy_factory['centralized_' + 'orca']()
         # self._centralized_planner.time_step = self.time_step
@@ -165,7 +183,7 @@ class CrowdWorld(dm_env.Environment):
         self._speed_limit = speed_limit
 
         self._observation_type = observation_type
-        self._local_map_size = 16
+        self._local_map_size = 8
         self._grid_size = 0.25
         self._occu_map_size = int((self._local_map_size//self._grid_size)**2) 
 
@@ -181,12 +199,18 @@ class CrowdWorld(dm_env.Environment):
         self._num_episode_steps = 0
         self._max_episode_length = max_episode_length
         self._last_dg = None
+        self.last_reward = None
 
         # for visualization
         self.scan_intersection = None
-        fig, ax = plt.subplots(figsize=(5,5)) 
-        ax.set_xlim(-self._map_size-1,self._map_size+1)
-        ax.set_ylim(-self._map_size-1,self._map_size+1)
+        self.render_axis = None
+        
+    
+    def init_render_ax(self,ax):
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(5,5)) 
+        ax.set_xlim(-self._map_size/2.-1,self._map_size/2.+1)
+        ax.set_ylim(-self._map_size/2.-1,self._map_size/2.+1)
         self.render_axis = ax
         if self.config.env.render:
             plt.ion()
@@ -208,47 +232,92 @@ class CrowdWorld(dm_env.Environment):
         if action[0]>self._speed_limit:
             reward -= self._velo_factor * (action[0]-self._speed_limit)
                 
-        return reward,done #TODO
+        return reward,done 
     def human_tracking_reward(self,action):
+        #np.array([dg,vx,vy,dgtheta,dgv,self.robot.radius],dtype=np.float32)
         done = False
         reward = 0
 
+        dxy = np.array(self.robot.get_goal_position())-np.array(self.robot.get_position())
+        dg = np.linalg.norm(dxy)
+        dgtheta = self.robot.goal_theta-self.robot.theta
+        dgv = self.robot.goal_v-np.linalg.norm(np.array([self.robot.vx,self.robot.vy]))
+        reward = self._goal_factor*(np.exp(-2*dg)+np.exp(-1*dgtheta))+self._velo_factor*np.exp(-0.1*dgv)
+
         return reward,done #TODO
     def pass_human_reward(self,action):
-        done = False
-        reward = 0
+        reward,done = self.point_goal_navi_reward(action)
+
+        dx = self.robot.gx - self.robot.px
+        dy = self.robot.gy - self.robot.py
+        dg = np.sqrt(dx*dx + dy*dy)
+        if dg <= 3:
+            return reward, done
+        rot = self.robot.theta #np.arctan2(self.robot.vy,self.robot.vx)
+        # vx = self.robot.vx*np.cos(rot) + self.robot.vy*np.sin(rot)
+        # vy = self.robot.vx*np.sin(rot) + self.robot.vy*np.cos(rot)
+
+        for agent in self.humans:
+            px_other = (agent.px-self.robot.px)*np.cos(rot) + (agent.py-self.robot.py)*np.sin(rot)
+            py_other = -(agent.px-self.robot.px)*np.sin(rot) + (agent.py-self.robot.py)*np.cos(rot)
+            # da_other = np.sqrt(px_other*px_other + py_other*py_other)
+
+            vx_other = agent.vx*np.cos(rot) + agent.vy*np.sin(rot)
+            vy_other = -agent.vx*np.sin(rot) + agent.vy*np.cos(rot)
+            # v_other =np.sqrt(vx_other*vx_other + vy_other*vy_other)
+
+            phi_other = np.arctan2(vy_other,vx_other)
+            # psi_rot = np.arctan2(vy_other-vy,vx_other-vx)
+            direction_diff = phi_other  # because ego-centric ego desirable direction psi=0
+
+            # passing 
+            if px_other>1 and px_other<4 and abs(direction_diff)>3.*np.pi/4.:
+                if self._forbiden_zone_y<0 and py_other<0 and py_other>-2: #right
+                    reward -= 0.05
+                if self._forbiden_zone_y>0 and py_other>0 and py_other<2: #left
+                    reward -= 0.05
 
         return reward,done #TODO
     def follow_wall_reward(self,action):
         done = False
         reward = 0
-
+        
         return reward,done #TODO
     
+    def cal_reward(self,action):
+        reward, done =self._reward_func_tabel[self._reward_func_id](action)
+        safety_penalty = 0.0
+        for i, human in enumerate(self.humans): 
+            closest_dist = norm(np.array([human.px - self.robot.px,human.py - self.robot.py]))
+            if closest_dist < self._discomfort_dist:
+                safety_penalty = safety_penalty + (closest_dist - self._discomfort_dist) #value<0
+        reward += self._discomfort_penalty_factor*safety_penalty
+        return reward, done
+    
     def randomize_map(self):
-        map_boundary = LinearRing( ((-self._map_size-1, self._map_size+1), 
-                                    (self._map_size+1, self._map_size+1),
-                                    (self._map_size+1, -self._map_size-1),
-                                    (-self._map_size-1,-self._map_size-1)) )
+        map_boundary = LinearRing( ((-self._map_size/2.-1, self._map_size/2.+1), 
+                                    (self._map_size/2.+1, self._map_size/2.+1),
+                                    (self._map_size/2.+1, -self._map_size/2.-1),
+                                    (-self._map_size/2.-1,-self._map_size/2.-1)) )
         map_ = {"polygon":[],"vertices":[],"boundary":map_boundary}
         #gen triangle
-        x = (np.random.random() - 0.5)*2*self._map_size
-        y = (np.random.random() - 0.5)*2*self._map_size
+        x = (np.random.random() - 0.5)*self._map_size
+        y = (np.random.random() - 0.5)*self._map_size
         angle1 = (np.random.random() - 0.5)*np.pi/3. + 2*np.pi/3.
         angle2 = (np.random.random() - 0.5)*np.pi/3. + 2*np.pi/3.
-        radius = np.random.random() * self._map_size/4.
+        radius = np.random.random() * self._map_size/6.
         triangle = genTriangle((x,y), [angle1,angle2], radius)
         #gen rectangle
-        x = (np.random.random() - 0.5)*2*self._map_size
-        y = (np.random.random() - 0.5)*2*self._map_size
-        w = np.random.random() * self._map_size/4.
-        h = np.random.random() * self._map_size/4.
+        x = (np.random.random() - 0.5)*self._map_size
+        y = (np.random.random() - 0.5)*self._map_size
+        w = np.random.random() * self._map_size/6.
+        h = np.random.random() * self._map_size/6.
         yaw = (np.random.random() - 0.5)*2*np.pi
         rectangle = genRectangle(x,y,w,h,yaw)
         #gen hex
-        x = (np.random.random() - 0.5)*2*self._map_size
-        y = (np.random.random() - 0.5)*2*self._map_size
-        radius = np.random.random() * self._map_size/4.
+        x = (np.random.random() - 0.5)*self._map_size
+        y = (np.random.random() - 0.5)*self._map_size
+        radius = np.random.random() * self._map_size/6.
         yaw = (np.random.random() - 0.5)*2*np.pi
         hex = genHexagon(x,y,radius,yaw)
 
@@ -277,13 +346,14 @@ class CrowdWorld(dm_env.Environment):
         # random human attribute
         human.sample_random_attributes()
         if square is False and non_stop is False:
+            counter = 2e4
             while True:
                 angle = np.random.random() * np.pi * 2
                 # add some noise to simulate all the possible cases robot could meet with human
-                px_noise = (np.random.random() - 0.5) * human.v_pref
-                py_noise = (np.random.random() - 0.5) * human.v_pref
-                px = self._map_size * np.cos(angle) + px_noise
-                py = self._map_size * np.sin(angle) + py_noise
+                px_noise = (np.random.random() - 0.5) * human.v_pref*2
+                py_noise = (np.random.random() - 0.5) * human.v_pref*2
+                px = self._map_size * np.cos(angle)/2. + px_noise
+                py = self._map_size * np.sin(angle)/2. + py_noise
 
                 collider = Point(px, py).buffer(human.radius)
                 collide = False
@@ -309,8 +379,9 @@ class CrowdWorld(dm_env.Environment):
                             norm((px - agent.gx, py - agent.gy)) < min_dist:
                         collide = True
                         break
-                if not collide:
+                if not collide or counter<0:
                     break
+                counter-=1
             human.start_pos.append((px, py))
             human.set(px, py, -px, -py, 0, 0, 0)
         elif square is False and non_stop is True:
@@ -332,13 +403,13 @@ class CrowdWorld(dm_env.Environment):
             # add some noise to simulate all the possible cases robot could meet with human
             px_noise = (np.random.random() - 0.5) * self.robot.v_pref
             py_noise = (np.random.random() - 0.5) * self.robot.v_pref
-            px = self._map_size * np.cos(angle) + px_noise
-            py = self._map_size * np.sin(angle) + py_noise
+            px = self._map_size * np.cos(angle)/2. + px_noise
+            py = self._map_size * np.sin(angle)/2. + py_noise
             
             angle = np.random.random() * np.pi * 2
             # add some noise to simulate all the possible cases robot could meet with human
-            gx_noise = (np.random.random() - 0.5) * self.robot.v_pref
-            gy_noise = (np.random.random() - 0.5) * self.robot.v_pref
+            gx_noise = (np.random.random() - 0.5)/2. * self.robot.v_pref
+            gy_noise = (np.random.random() - 0.5)/2. * self.robot.v_pref
             gx = self._map_size * np.cos(angle) + gx_noise
             gy = self._map_size * np.sin(angle) + gy_noise
             if (gx-px)**2+(gy-py)**2<6**2:
@@ -400,7 +471,7 @@ class CrowdWorld(dm_env.Environment):
         self.humans = []
         for i in range(human_num):
             self.humans.append(self.generate_human())
-
+        
         self._num_episode_steps = 0
         self.global_time = 0
         self.case_counter[self.phase] = (self.case_counter[self.phase] + 1) % self.case_size[self.phase]
@@ -411,12 +482,15 @@ class CrowdWorld(dm_env.Environment):
 
         self._state = self.get_obs()
         self._last_dg = self._state[-6]
+    
         return ExtendedTimeStep(
             step_type=dm_env.StepType.FIRST,
             action=np.array([0,0]),
             reward=0.0,
             discount=self._discount,
-            observation=self._state)
+            observation=self._state,
+            # physics=np.array(physics,dtype=np.float32),
+            )
     
     def get_static_scan(self):
         num_line = sum([len(obstacle)-1 for obstacle in self._layout["vertices"]])+4 #for boundary
@@ -540,12 +614,7 @@ class CrowdWorld(dm_env.Environment):
                 if grid_x>=0 and grid_x<semantic_occu_map.shape[0] \
                 and grid_y>=0 and grid_y<semantic_occu_map.shape[1]:
                     semantic_occu_map[grid_x,grid_y,1] = 1.0
-            # if DEBUG:
-            #     fig, ax = plt.subplots()
-            #     ax.pcolor(semantic_occu_map[...,1]+semantic_occu_map[...,0]*0.5, cmap=plt.cm.Blues)
-            #     plt.show()
-            #     plt.close()
-            #     plt.clf()
+
             dxy = np.array(self.robot.get_goal_position())-np.array(self.robot.get_position())
             dg = np.linalg.norm(dxy)
             da = np.arctan2(dxy[1],dxy[0])
@@ -568,13 +637,6 @@ class CrowdWorld(dm_env.Environment):
             if self.robot.visible:
                 ob += [self.robot.get_observable_state()]
         return ob
-
-    #TODO impl for multitask, 
-    # also the lidar scan is not good (not evenly distributed? why?)
-    # <-solved: need boundary...SB original developer
-    def cal_reward(self,action):
-        reward, done =self._reward_func_tabel[self._reward_func_id](action)
-        return reward, done
 
     def step(self, action):
 
@@ -616,13 +678,16 @@ class CrowdWorld(dm_env.Environment):
             discount = self._discount
 
         self._last_dg = self._state[-6]
-        
+        self.last_reward = reward
+
         return ExtendedTimeStep(
             step_type=step_type,
             action=action,
             reward=np.float32(reward),
             discount=discount,
-            observation=self._state)
+            observation=self._state,
+            # physics=np.array(physics,dtype=np.float32),
+            )
 
     def render(self, return_rgb=True):
         # x,y = self._layout["boundary"].exterior.xy
@@ -662,7 +727,7 @@ class CrowdWorld(dm_env.Environment):
         if return_rgb:
             fig = plt.gcf()
             plt.axis('tight')
-            plt.subplots_adjust(0, 0, 1, 1, 0, 0)
+            # plt.subplots_adjust(0, 0, 1, 1, 0, 0)
             fig.canvas.draw()
             data = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
             w, h = fig.canvas.get_width_height()
@@ -676,7 +741,7 @@ class CrowdWorld(dm_env.Environment):
                 while ii < n_laser:
                     lines.append(self.scan_intersection[ii])
                     ii = ii + 36
-                lc = mc.LineCollection(lines,linewidths=1,linestyles='--')
+                lc = mc.LineCollection(lines,linewidths=1,linestyles='--',alpha=0.2)
                 ax.add_artist(lc)
                 artists.append(lc)
             plt.pause(0.1)

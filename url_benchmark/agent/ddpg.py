@@ -34,7 +34,7 @@ class DDPGAgentConfig:
     obs_shape: tp.Tuple[int, ...] = omegaconf.MISSING  # to be specified later
     action_shape: tp.Tuple[int, ...] = omegaconf.MISSING  # to be specified later
     device: str = omegaconf.II("device")
-    lr: float = 1e-4
+    lr: float = 1e-5
     critic_target_tau: float = 0.01
     update_every_steps: int = 2
     use_tb: bool = omegaconf.II("use_tb")
@@ -59,7 +59,7 @@ class Encoder(nn.Module):
         super().__init__()
 
         assert len(obs_shape) == 3
-        self.repr_dim = 32 * 35 * 35
+        self.repr_dim = 32 * 10 * 10
 
         self.convnet = nn.Sequential(nn.Conv2d(obs_shape[0], 32, 3, stride=2),
                                      nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
@@ -80,8 +80,14 @@ class CrowdEncoderOM(nn.Module): #TODO test
         super().__init__()
 
         assert len(obs_shape) == 1
-        self.h_om_dim = 32 * 25 * 25
         self.r_state_dim = 6
+        self.grid_dim = int(np.sqrt(obs_shape[0]-self.r_state_dim))
+        if self.grid_dim == 64:
+            self.h_om_dim = 32 * 25 * 25
+        elif self.grid_dim == 32:
+            self.h_om_dim = 32 * 9 * 9
+        else:
+            raise NotImplementedError
         self.repr_dim = 256
 
         self.convnet = nn.Sequential(nn.Conv2d(1, 32, 3, stride=2),
@@ -97,9 +103,9 @@ class CrowdEncoderOM(nn.Module): #TODO test
         self.apply(utils.weight_init)
 
     def forward(self, obs) -> Any:
-        om = obs[:,:-self.r_state_dim].view(obs.shape[0],1,64,64)
+        om = obs[:,:-self.r_state_dim].view(obs.shape[0],1,self.grid_dim,self.grid_dim)
         r_state = obs[:,-self.r_state_dim:]
-        om = om - 0.5
+        # om = om - 0.5
         h = self.convnet(om)
         h = h.view(h.shape[0], -1)
         h = torch.cat([h, r_state], dim=-1)

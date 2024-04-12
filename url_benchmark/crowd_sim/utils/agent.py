@@ -8,6 +8,7 @@ from url_benchmark.crowd_sim.utils.state import ObservableState, FullState, ExFu
 
 import shapely
 from shapely.geometry import Polygon, LineString, MultiPolygon,Point
+import typing as tp
 
 class Agent(object):
     def __init__(self, config, section):
@@ -21,17 +22,17 @@ class Agent(object):
         self.policy = policy_factory[getattr(config, section).policy]()
         self.sensor = getattr(config, section).sensor
         self.kinematics = self.policy.kinematics if self.policy is not None else None
-        self.px = None
-        self.py = None
-        self.gx = None
-        self.gy = None
-        self.vx = None
-        self.vy = None
-        self.theta = None
-        self.goal_theta = None
-        self.goal_v = None
-        self.time_step = None
-        self.w = 0.0
+        self.px : float 
+        self.py : float
+        self.gx : float
+        self.gy : float
+        self.vx : float
+        self.vy : float
+        self.theta : float
+        self.goal_theta : float
+        self.goal_v : float
+        self.time_step : float
+        self.w : float
 
         #TODO deal with different shape
         self.collider = None 
@@ -57,7 +58,8 @@ class Agent(object):
         self.v_pref = np.random.uniform(0.5, 1.5)
         self.radius = np.random.uniform(0.3, 0.5)
 
-    def set(self, px, py, gx, gy, vx, vy, theta, radius=None, v_pref=None,goal_theta=None,goal_v=None):
+    def set(self, px:float, py:float, gx:float, gy:float, vx:float, vy:float, theta:float, 
+            radius:tp.Optional[float]=None, v_pref:tp.Optional[float]=None,goal_theta:tp.Optional[float]=None,goal_v:tp.Optional[float]=None):
         self.px = px
         self.py = py
         self.sx = px

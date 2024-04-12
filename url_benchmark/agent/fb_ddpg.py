@@ -44,7 +44,7 @@ class FBDDPGAgentConfig:
     obs_shape: tp.Tuple[int, ...] = omegaconf.MISSING  # to be specified later
     action_shape: tp.Tuple[int, ...] = omegaconf.MISSING  # to be specified later
     device: str = omegaconf.II("device")  # ${device}
-    lr: float = 1e-4
+    lr: float = 1e-6 #1e-4
     lr_coef: float = 1
     fb_target_tau: float = 0.01  # 0.001-0.01
     update_every_steps: int = 2
@@ -183,7 +183,7 @@ class FBDDPGAgent:
     def get_goal_meta(self, goal_array: np.ndarray) -> MetaDict:
         desired_goal = torch.tensor(goal_array).unsqueeze(0).to(self.cfg.device)
         with torch.no_grad():
-            z = self.backward_net(desired_goal)
+            z = self.backward_net(self.aug_and_encode(desired_goal))
         if self.cfg.norm_z:
             z = math.sqrt(self.cfg.z_dim) * F.normalize(z, dim=1)
         z = z.squeeze(0).cpu().numpy()
@@ -218,10 +218,10 @@ class FBDDPGAgent:
         # obs = obs[idx]
         # reward = reward[idx]
         with torch.no_grad():
-            B = self.backward_net(obs)
+            B = self.backward_net(self.aug_and_encode(obs))
         z = torch.matmul(reward.T, B) / reward.shape[0]
         if self.cfg.norm_z:
-            z = math.sqrt(self.cfg.z_dim) * F.normalize(z, dim=1)
+            z = math.sqrt(self.cfg.z_dim) * F.normalize(z, dim=0)
         meta = OrderedDict()
         meta['z'] = z.squeeze().cpu().numpy()
         # self.solved_meta = meta
@@ -275,9 +275,9 @@ class FBDDPGAgent:
             if self.cfg.additional_metric:
                 # the following is doing extra computation only used for metrics,
                 # it should be deactivated eventually
-                F_mean_s = self.forward_net(obs, z, action)
+                F_mean_s = self.forward_net(h, z, action)
                 # F_samp_s = self.forward_net(obs, z, dist.sample())
-                F_rand_s = self.forward_net(obs, z, torch.zeros_like(action).uniform_(-1.0, 1.0))
+                F_rand_s = self.forward_net(h, z, torch.zeros_like(action).uniform_(-1.0, 1.0))
                 Qs = [torch.min(*(torch.einsum('sd, sd -> s', F, z) for F in Fs)) for Fs in [F_mean_s, F_rand_s]]
                 self.actor_success = (Qs[0] > Qs[1]).cpu().numpy().tolist()
         else:
@@ -290,6 +290,7 @@ class FBDDPGAgent:
         goal = time_step.goal if self.cfg.goal_space is not None else time_step.observation  # type: ignore
         with torch.no_grad():
             zs = [torch.Tensor(x).unsqueeze(0).float().to(self.cfg.device) for x in [goal, meta["z"]]]
+            zs[0] = self.aug_and_encode(zs[0])
             zs[0] = self.backward_net(zs[0])
             zs = [F.normalize(z, 1) for z in zs]
             return torch.matmul(zs[0], zs[1].T).item()
@@ -440,13 +441,23 @@ class FBDDPGAgent:
         batch = batch.to(self.cfg.device)
 
         # pdb.set_trace()
-        obs = batch.obs
+        #obs = self.encoder(batch.obs)
         action = batch.action
         discount = batch.discount
-        next_obs = next_goal = batch.next_obs
+        obs = self.aug_and_encode(batch.obs)
+        next_obs = next_goal = self.aug_and_encode(batch.next_obs)
         if self.cfg.goal_space is not None:
             assert batch.next_goal is not None
-            next_goal = batch.next_goal
+            next_goal = self.aug_and_encode(batch.next_goal)
+        if not self.cfg.update_encoder:
+            obs = obs.detach()
+            next_obs = next_obs.detach()
+            next_goal = next_goal.detach()
+            
+        #next_obs = next_goal = self.encoder(batch.next_obs)
+        # if self.cfg.goal_space is not None:
+        #     assert batch.next_goal is not None
+        #     next_goal = batch.next_goal
 
         # if len(batch.meta) == 1 and batch.meta[0].shape[-1] == self.cfg.z_dim:
         #     z = batch.meta[0]
@@ -457,11 +468,7 @@ class FBDDPGAgent:
         z = self.sample_z(self.cfg.batch_size, device=self.cfg.device)
         if not z.shape[-1] == self.cfg.z_dim:
             raise RuntimeError("There's something wrong with the logic here")
-        # obs = self.aug_and_encode(batch.obs)
-        # next_obs = self.aug_and_encode(batch.next_obs)
-        # if not self.cfg.update_encoder:
-        #     obs = obs.detach()
-        #     next_obs = next_obs.detach()
+        
 
         backward_input = batch.obs
         future_goal = batch.future_obs
@@ -472,6 +479,7 @@ class FBDDPGAgent:
 
         perm = torch.randperm(self.cfg.batch_size)
         backward_input = backward_input[perm]
+        backward_input = self.aug_and_encode(backward_input)
 
         if self.cfg.mix_ratio > 0:
             mix_idxs: tp.Any = np.where(np.random.uniform(size=self.cfg.batch_size) < self.cfg.mix_ratio)[0]
@@ -500,7 +508,7 @@ class FBDDPGAgent:
                                       next_obs=next_obs, next_goal=next_goal, z=z, step=step))
 
         # update actor
-        metrics.update(self.update_actor(obs, z, step))
+        metrics.update(self.update_actor(obs.detach(), z, step))
 
         # update critic target
         utils.soft_update_params(self.forward_net, self.forward_target_net,

@@ -321,6 +321,7 @@ class APSAgent(DDPGAgent):
         print('mean reward: ', reward.mean().cpu().item())
         print('num reward: ', reward.shape[0])
 
+        obs = self.aug_and_encode(obs)
         rep = self.aps(obs)
         # task = torch.linalg.lstsq(reward, rep)[0][:rep.size(1), :][0]
         task = torch.linalg.lstsq(rep, reward)[0].squeeze()
