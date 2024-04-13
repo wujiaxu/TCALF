@@ -525,26 +525,35 @@ class CrowdNaviReward(BaseReward):
                 },
                 'Tracking':{
                     "random_goal_velocity":True,
-                    "reward_func_ids": 1
+                    "reward_func_ids": 1,
+                    "discomfort_dist" : 0.2,
+                    "speed_limit":1.0,
                 },
                 'PassLeftSide':{
                     "random_goal_velocity":False,
                     "reward_func_ids": 2,
                     "forbiden_zone_y":0.6,
+                    "discomfort_dist" : 0.2,
+                    "speed_limit":1.0,
                 },
                 'PassRightSide':{
                     "random_goal_velocity":False,
                     "reward_func_ids": 2,
                     "forbiden_zone_y" : -0.6,
+                    "discomfort_dist" : 0.2,
+                    "speed_limit":1.0,
                 },
                 'FollowWall':{
                     "random_goal_velocity":False,
-                    "reward_func_ids": 3
+                    "reward_func_ids": 3,
+                    "discomfort_dist" : 0.2,
+                    "speed_limit":1.0,
                 },
                 'AwayFromHuman':{
                     "random_goal_velocity":False,
                     "reward_func_ids": 0,
                     "discomfort_dist" : 0.8,
+                    "speed_limit":1.0,
                 },
                 'LowSpeed':{
                     "random_goal_velocity":False,
@@ -599,7 +608,7 @@ class CrowdNaviReward(BaseReward):
                 reward -= 0.2 * (action[0]-self.task["speed_limit"])
             if dg > 3:
                 rot = np.arctan2(vy,vx)
-                for i in human_states.shape[0]:
+                for i in range(human_states.shape[0]):
                     px_other = (human_states[i,0]-px)*np.cos(rot) + (human_states[i,1]-py)*np.sin(rot)
                     py_other = -(human_states[i,0]-px)*np.sin(rot) + (human_states[i,1]-py)*np.cos(rot)
                     # da_other = np.sqrt(px_other*px_other + py_other*py_other)

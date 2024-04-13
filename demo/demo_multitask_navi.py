@@ -45,6 +45,7 @@ from url_benchmark import utils
 from url_benchmark.video import VideoRecorder
 logger = logging.getLogger(__name__)
 
+import matplotlib.pyplot as plt
 # st.set_page_config(
 #     page_title="Controllable agent - Meta AI",
 #     menu_items={"About": "This demo is powered by the code available at https://github.com/facebookresearch/controllable_agent\nCopyright 2022 Meta Inc. Available under MIT Licence."},
@@ -61,7 +62,7 @@ logger = logging.getLogger(__name__)
 # """)
 # st.sidebar.write("The [code is open-source](https://github.com/facebookresearch/controllable_agent).")
 
-model_path = Path("/home/dl/wu_ws/TCALF/url_benchmark/exp_local/2024.04.09/234316_aps_crowdnavi_PointGoalNavi_online/models")
+model_path = Path("/home/dl/wu_ws/TCALF/url_benchmark/exp_local/2024.04.12/173207_aps_crowdnavi_PointGoalNavi_online/models")
 # if not model_path.exists():
 #     model_path = base / "models"
 
@@ -80,12 +81,14 @@ CASES = {x: y for x, y in CASES.items() if y.exists()}
 case = list(CASES)[0]
 assert case is not None
 
+# fig, ax = plt.subplots(figsize=(5,5)) 
 
 # @st.cache(max_entries=1, allow_output_mutation=True)
 def load_workspace(case: str):
     checkpoint = CASES[case]
     hp = runner.HydraEntryPoint(base / "url_benchmark/anytrain.py")
-    ws = hp.workspace(task="crowdnavi_PointGoalNavi", replay_buffer_episodes=100)
+    ws = hp.workspace(task="crowdnavi_PointGoalNavi", replay_buffer_episodes=2000)
+    # ws.train_env.base_env.init_render_ax(ax)
     ws.train_env.reset()
     with checkpoint.open("rb") as f:
         payload = torch.load(f, map_location=ws.device)
@@ -146,14 +149,14 @@ if string and string is not None:
         with torch.no_grad(), utils.eval_mode(ws.agent):
             action = ws.agent.act(time_step.observation,
                                   meta,
-                                  5000,
+                                  1000000,
                                   eval_mode=True)
         t1 = time.time()
         time_step = env.step(action)
         
         t2 = time.time()
         # recorder.record(env)
-        env.render(return_rgb=False)
+        # env.render(return_rgb=False)
         t3 = time.time()
         durations["model"] += t1 - t0
         durations["env"] += t2 - t1
@@ -161,7 +164,8 @@ if string and string is not None:
         total_reward += time_step.reward #reward.from_env(env)
         
     print(f"Total play time {time.time() - t_start:.2f}s with {durations}")
-    print(f"Average reward is {total_reward / k}\n\n")
+    print(f"Reward is {total_reward}\n\n")
+    print(k)
     # state = reward._extract(env)
     # state_str = " ".join(f"{x}={y:.2f}" for x, y in state.items())
     # name = string+"_demo.mp4"

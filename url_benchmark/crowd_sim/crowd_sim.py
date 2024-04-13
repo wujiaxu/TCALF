@@ -212,9 +212,9 @@ class CrowdWorld(dm_env.Environment):
         ax.set_xlim(-self._map_size/2.-1,self._map_size/2.+1)
         ax.set_ylim(-self._map_size/2.-1,self._map_size/2.+1)
         self.render_axis = ax
-        if self.config.env.render:
-            plt.ion()
-            plt.show()
+        # if self.config.env.render:
+        #     plt.ion()
+        #     plt.show()
 
     def point_goal_navi_reward(self,action):
         done = False
@@ -408,10 +408,10 @@ class CrowdWorld(dm_env.Environment):
             
             angle = np.random.random() * np.pi * 2
             # add some noise to simulate all the possible cases robot could meet with human
-            gx_noise = (np.random.random() - 0.5)/2. * self.robot.v_pref
-            gy_noise = (np.random.random() - 0.5)/2. * self.robot.v_pref
-            gx = self._map_size * np.cos(angle) + gx_noise
-            gy = self._map_size * np.sin(angle) + gy_noise
+            gx_noise = (np.random.random() - 0.5) * self.robot.v_pref
+            gy_noise = (np.random.random() - 0.5) * self.robot.v_pref
+            gx = self._map_size * np.cos(angle)/2.+ gx_noise
+            gy = self._map_size * np.sin(angle)/2.+ gy_noise
             if (gx-px)**2+(gy-py)**2<6**2:
                 continue
             collider = Point(px, py).buffer(self.robot.radius)
@@ -625,8 +625,12 @@ class CrowdWorld(dm_env.Environment):
             dgv = self.robot.goal_v-np.linalg.norm(np.array([self.robot.vx,self.robot.vy]))
 
             return np.hstack([semantic_occu_map[...,1].flatten()+semantic_occu_map[...,0].flatten()*0.5,
-                              np.array([dg,vx,vy,dgtheta,dgv,self.robot.radius],dtype=np.float32)])
+                              np.array([dg,vx,vy,dgtheta,dgv,self.robot.radius],dtype=np.float32)]) 
         else:
+            # rethink of dg,vx,vy,dgtheta,dgv,self.robot.radius
+            # there is no information about theta of the robot in goal coordinate
+            # dgtheta is pose diff 
+            # need state representation such that s,a can specify r and s'
             raise NotImplementedError
         
     def compute_observation_for(self, agent):

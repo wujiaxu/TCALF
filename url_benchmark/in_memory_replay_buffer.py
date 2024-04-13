@@ -176,7 +176,7 @@ class ReplayBuffer:
                     if self._storage['reward'][ep_idx[i], step_idx[i]] == -0.25:
                         reward.append(-0.25)
                     else:
-                        reward.append(custom_reward.compute_reward(obs[i],action[i],next_obs[i],phy[i])) #need rescale action by v_pref and w_constrain
+                        reward.append(custom_reward.compute_reward(obs[i],action[i]*np.array([1.0,np.pi/6]),next_obs[i],phy[i])) #need rescale action by v_pref and w_constrain
                 reward = np.array(reward).astype(np.float32)
             else:
                 reward = np.array([[custom_reward.from_physics(p)] for p in phy], dtype=np.float32)
@@ -185,9 +185,11 @@ class ReplayBuffer:
         discount = self._discount * self._storage['discount'][ep_idx, step_idx]
 
         # import matplotlib.pyplot as plt
+        # plt.scatter(phy[:,1],phy[:,2],alpha=0.1)
         # plt.hist(obs[:,-6],bins=100)
         # plt.hist(action[:,1],bins=10)
-        # plt.savefig("dist_rot.png")
+        # plt.hist(reward,bins=10)
+        # plt.savefig("dist_xy.png")
         # plt.close()
 
         goal: tp.Optional[np.ndarray] = None
