@@ -1,5 +1,5 @@
-from url_benchmark.crowd_sim.utils.agent import Agent
-from url_benchmark.crowd_sim.utils.state import JointState
+from controllable_navi.crowd_sim.utils.agent import Agent
+from controllable_navi.crowd_sim.utils.state import JointState
 
 
 class Human(Agent):

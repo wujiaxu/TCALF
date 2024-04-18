@@ -2,9 +2,9 @@ import abc
 import logging
 import numpy as np
 from numpy.linalg import norm
-from url_benchmark.crowd_sim.policy.policy_factory import policy_factory
-from url_benchmark.crowd_sim.utils.action import ActionXY, ActionRot, ActionVW
-from url_benchmark.crowd_sim.utils.state import ObservableState, FullState, ExFullState
+from controllable_navi.crowd_sim.policy.policy_factory import policy_factory
+from controllable_navi.crowd_sim.utils.action import ActionXY, ActionRot, ActionVW
+from controllable_navi.crowd_sim.utils.state import ObservableState, FullState, ExFullState
 
 import shapely
 from shapely.geometry import Polygon, LineString, MultiPolygon,Point
@@ -20,7 +20,7 @@ class Agent(object):
         self.v_pref = getattr(config, section).v_pref
         self.radius = getattr(config, section).radius
         self.policy = policy_factory[getattr(config, section).policy]()
-        self.sensor = getattr(config, section).sensor
+        # self.sensor = getattr(config, section).sensor
         self.kinematics = self.policy.kinematics if self.policy is not None else None
         self.px : float 
         self.py : float
@@ -58,7 +58,7 @@ class Agent(object):
         self.v_pref = np.random.uniform(0.5, 1.5)
         self.radius = np.random.uniform(0.3, 0.5)
 
-    def set(self, px:float, py:float, gx:float, gy:float, vx:float, vy:float, theta:float, 
+    def set(self, px:float, py:float, gx:float, gy:float, vx:float, vy:float, theta:float, w:float=0.,
             radius:tp.Optional[float]=None, v_pref:tp.Optional[float]=None,goal_theta:tp.Optional[float]=None,goal_v:tp.Optional[float]=None):
         self.px = px
         self.py = py
@@ -69,6 +69,7 @@ class Agent(object):
         self.vx = vx
         self.vy = vy
         self.theta = theta
+        self.w = w
         if radius is not None:
             self.radius = radius
         if v_pref is not None:
@@ -166,6 +167,7 @@ class Agent(object):
                 self.theta = (self.theta + action.w * self.time_step/self.time_sampling) % (2 * np.pi)
                 self.vx = action.v * np.cos(self.theta)
                 self.vy = action.v * np.sin(self.theta)
+                self.w  = action.w
             else:
                 self.theta = (self.theta + action.r) % (2 * np.pi)
                 self.vx = action.v * np.cos(self.theta)

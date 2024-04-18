@@ -1,26 +1,38 @@
 from pathlib import Path
 import sys
 base = Path(__file__).absolute().parents[1]
+print(base)
 # we need to add base repo to be able to import url_benchmark
 # we need to add url_benchmarl to be able to reload legacy checkpoints
 for fp in [base, base / "url_benchmark"]:
     assert fp.exists()
     if str(fp) not in sys.path:
         sys.path.append(str(fp))
+for fp in [base, base / "controllable_navi"]:
+    assert fp.exists()
+    if str(fp) not in sys.path:
+        sys.path.append(str(fp))
 import dm_env
-from url_benchmark.crowd_sim.crowd_sim import build_crowdworld_task
+from controllable_navi.crowd_sim.crowd_sim import build_crowdworld_task
 import numpy as np
+from url_benchmark.video import VideoRecorder
+from url_benchmark import dmc
 
-crowd_sim = build_crowdworld_task("PointGoalNavi","train")
+recorder = VideoRecorder(base / "controllable_navi", camera_id=0, use_wandb=False)
+recorder.enabled = True
+
+crowd_sim = dmc.EnvWrapper(build_crowdworld_task("PointGoalNavi","train"))
+
 n_episodes = 5
 for i in range(n_episodes):
     step_ex = crowd_sim.reset()
-    for j in range(30):
+    recorder.init(crowd_sim)
+    while not step_ex.step_type == dm_env.StepType.LAST:
         step_ex = crowd_sim.step(np.array([0.7,-0.5]))
         # print(step_ex.observation.dtype) make sure the obs is float32 matched to torch model
-        crowd_sim.render(return_rgb=False)
-        if step_ex.step_type == dm_env.StepType.LAST:
-            break
+        recorder.record(crowd_sim)
+    recorder.save("debug_test_demo_{}.mp4".format(i))
+
     
 
 # import matplotlib.pyplot as plt

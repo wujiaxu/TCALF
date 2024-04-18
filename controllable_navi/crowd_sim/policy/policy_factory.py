@@ -1,6 +1,6 @@
-from url_benchmark.crowd_sim.policy.linear import Linear
-# from url_benchmark.crowd_sim.policy.orca import ORCA, CentralizedORCA
-from url_benchmark.crowd_sim.policy.socialforce import SocialForce, CentralizedSocialForce
+from controllable_navi.crowd_sim.policy.linear import Linear
+# from controllable_navi.crowd_sim.policy.orca import ORCA, CentralizedORCA
+from controllable_navi.crowd_sim.policy.socialforce import SocialForce, CentralizedSocialForce
 
 
 def none_policy():

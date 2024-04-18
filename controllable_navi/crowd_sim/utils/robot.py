@@ -1,7 +1,7 @@
-from url_benchmark.crowd_sim.utils.agent import Agent
-from url_benchmark.crowd_sim.utils.state import JointState
-from url_benchmark.crowd_sim import policy
-from url_benchmark.crowd_sim.utils.action import ActionVW
+from controllable_navi.crowd_sim.utils.agent import Agent
+from controllable_navi.crowd_sim.utils.state import JointState
+from controllable_navi.crowd_sim import policy
+from controllable_navi.crowd_sim.utils.action import ActionVW
 
 
 class Robot(Agent):

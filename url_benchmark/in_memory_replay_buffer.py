@@ -103,7 +103,7 @@ class ReplayBuffer:
 
     def add(self, time_step: TimeStep, meta: tp.Mapping[str, np.ndarray]) -> None:
         dtype = np.float32
-    
+        # TODO add G on episode end
         # print(meta)->OrderedDict([('task', array([ 0.01439587, -0.09590689, -0.18284939,  0.20553997,  0.08937766,0.41374323,  0.26285544, -0.4683657 , -0.48206484, -0.4635691 ],dtype=float32))])
         # print(self._current_episode.keys())->dict_keys(['task', 'step_type', 'reward', 'discount', 'observation', 'physics', 'action'])
         for key, value in meta.items():

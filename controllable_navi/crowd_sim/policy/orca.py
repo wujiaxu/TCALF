@@ -1,7 +1,7 @@
 import numpy as np
 import rvo2
-from url_benchmark.crowd_sim.policy.policy import Policy
-from url_benchmark.crowd_sim.utils.action import ActionXY
+from controllable_navi.crowd_sim.policy.policy import Policy
+from controllable_navi.crowd_sim.utils.action import ActionXY
 
 
 class ORCA(Policy):

@@ -2,6 +2,7 @@ import logging
 import random
 import math
 import typing as tp
+import dataclasses
 import shapely
 from shapely.geometry import Polygon, LineString, MultiPolygon, LinearRing,Point
 
@@ -13,23 +14,25 @@ import matplotlib.lines as mlines
 from matplotlib import patches
 import numpy as np
 from numpy.linalg import norm
-from url_benchmark.crowd_sim.C_library.motion_plan_lib import *
 
-from url_benchmark.crowd_sim.policy.policy_factory import policy_factory
-from url_benchmark.crowd_sim.utils.state import tensor_to_joint_state, JointState,ExFullState
-from url_benchmark.crowd_sim.utils.action import ActionRot,ActionVW
-from url_benchmark.crowd_sim.utils.human import Human
-from url_benchmark.crowd_sim.utils.robot import Robot
-from url_benchmark.crowd_sim.utils.info import *
-from url_benchmark.crowd_sim.utils.utils import point_to_segment_dist
-from url_benchmark.crowd_sim.utils.obstacle import *
+from controllable_navi.crowd_sim.C_library.motion_plan_lib import *
+from controllable_navi.crowd_sim.policy.policy_factory import policy_factory
+from controllable_navi.crowd_sim.utils.state import tensor_to_joint_state, JointState,ExFullState
+from controllable_navi.crowd_sim.utils.action import ActionRot,ActionVW
+from controllable_navi.crowd_sim.utils.human import Human
+from controllable_navi.crowd_sim.utils.robot import Robot
+from controllable_navi.crowd_sim.utils.info import *
+from controllable_navi.crowd_sim.utils.utils import point_to_segment_dist
+from controllable_navi.crowd_sim.utils.obstacle import *
 
 import dm_env
 from dm_env import specs
 import enum
 from url_benchmark.dmc import ExtendedTimeStep,TimeStep
+from hydra.core.config_store import ConfigStore
+import omegaconf
 
-DEBUG = True
+# DEBUG = True
 # laser scan parameters
 # number of all laser beams
 n_laser = 1800
@@ -62,80 +65,116 @@ class CrowdPhysics:
         return np.array(physics,dtype=np.float32)
     def render(self, height,width,camera_id):
         if self._env.render_axis is None:
-            self._env.config.env.render = False
+            # self._env.config.env.render = False
             self._env.init_render_ax(None)
         return self._env.render(return_rgb=True)
+
+@dataclasses.dataclass
+class CrowdSimConfig:
+    _target_: str = "controllable_navi.crowd_sim.crowd_sim.CrowdWorld"
+    name: str = "CrowdWorld"
+    max_human_num: int = 6 
+    map_size: float = 10
+
+    human_policy: str = 'socialforce'
+    human_radius: float = 0.3
+    human_v_pref: float = 1.0
+    human_visible: bool = True
+
+    robot_policy: str = 'none'
+    robot_radius: float = 0.3
+    robot_v_pref: float = 1.0
+    robot_visible: bool = True
+    robot_rotation_constrain: float = np.pi/6
+
+    penalty_collision: float = -2.
+    reward_goal: float = 0.25
+    goal_factor: float = 0.2
+    goal_range: float = 0.3
+    velo_factor: float = 0.2
+    discomfort_penalty_factor: float = 1.0
+
+
+cs = ConfigStore.instance()
+cs.store(group="crowd_sim", name="CrowdWorld", node=CrowdSimConfig)
 
 def build_crowdworld_task(task,phase,
                          discount=0.9,
                          observation_type=ObservationType.OCCU_MAP,
                          max_episode_length=200):
+    cfg = CrowdSimConfig()
+
+    # currently robot and human class need Config class to init
     class Config(object):
         def __init__(self):
             pass
     class EnvConfig(object):
 
         env = Config()
-        env.render = True
+        env.human_num = [1,cfg.max_human_num]
+        env.map_size = cfg.map_size
 
         humans = Config()
-        humans.visible = True
-        humans.policy = 'socialforce'
-        humans.radius = 0.3
-        humans.v_pref = 1.0
-        humans.sensor = 'coordinates'
+        humans.visible = cfg.human_visible
+        humans.policy = cfg.human_policy
+        humans.radius = cfg.human_radius
+        humans.v_pref = cfg.human_v_pref
 
         robot = Config()
-        robot.visible = True
-        robot.policy = 'none'
-        robot.radius = 0.3
-        robot.v_pref = 1.0
-        robot.sensor = 'coordinates'
-        robot.rotation_constraint = np.pi/6
-    
+        robot.visible = cfg.robot_visible
+        robot.policy = cfg.robot_policy
+        robot.radius = cfg.robot_radius
+        robot.v_pref = cfg.robot_v_pref
+        robot.rotation_constraint = cfg.robot_rotation_constrain
+ 
     config = EnvConfig()
 
     tasks_specifications = {
+                # 'PointGoalExplore':{
+                #     "reward_func_ids":0,
+                #     "discomfort_dist" : 0.0,
+                #     "speed_limit":5.0,
+                # },
                 'PointGoalNavi':{
-                    "random_goal_velocity":False,
                     "reward_func_ids":0,
                     "discomfort_dist" : 0.2,
-                },
-                'Tracking':{
-                    "random_goal_velocity":True,
-                    "reward_func_ids": 1
+                    "speed_limit":1.0,
                 },
                 'PassLeftSide':{
-                    "random_goal_velocity":False,
                     "reward_func_ids": 2,
                     "forbiden_zone_y":0.6,
+                    "discomfort_dist" : 0.2,
+                    "speed_limit":1.0,
                 },
                 'PassRightSide':{
-                    "random_goal_velocity":False,
                     "reward_func_ids": 2,
                     "forbiden_zone_y" : -0.6,
+                    "discomfort_dist" : 0.2,
+                    "speed_limit":1.0,
                 },
                 'FollowWall':{
-                    "random_goal_velocity":False,
-                    "reward_func_ids": 3
+                    "reward_func_ids": 3,
+                    "discomfort_dist" : 0.2,
+                    "speed_limit":1.0,
                 },
                 'AwayFromHuman':{
-                    "random_goal_velocity":False,
                     "reward_func_ids": 0,
                     "discomfort_dist" : 0.8,
+                    "speed_limit":1.0,
                 },
                 'LowSpeed':{
-                    "random_goal_velocity":False,
                     "reward_func_ids": 0,
                     "speed_limit":0.5,
                 }
                             }
-    return CrowdWorld(phase,config,observation_type,discount,max_episode_length,**tasks_specifications[task])
+    return CrowdWorld(phase,cfg, config,observation_type,discount,max_episode_length,**tasks_specifications[task])
 
 
 class CrowdWorld(dm_env.Environment):
 
-    def __init__(self, phase,config,
+    def __init__(self, phase,
+                 cfg:CrowdSimConfig, 
+                 config,
                observation_type=ObservationType.OCCU_FLOW,
                discount=0.9,
                max_episode_length=None,
@@ -143,8 +182,7 @@ class CrowdWorld(dm_env.Environment):
                discomfort_dist = 0.2,
                to_wall_dist = 0.2,
                speed_limit = 1.0,
-               reward_func_ids=[0],
-               random_goal_velocity=False) -> None:
+               reward_func_ids=0) -> None:
         #TODO: modify input to adapt crowdsim
         if observation_type not in ObservationType:
             raise ValueError('observation_type should be a ObservationType instace.')
@@ -152,9 +190,9 @@ class CrowdWorld(dm_env.Environment):
         self.config = config
         self.physics = CrowdPhysics(self)
 
-        self._map_size = 10 #circle
-        self._layout = None
-        self._human_num = [1,6]
+        self._map_size = self.config.env.map_size #circle
+        self._layout: dict = {"polygon":[],"vertices":[],"boundary":None}
+        self._human_num = self.config.env.human_num
         self._time_step = 0.25
         self.robot = Robot(config,"robot")
         self.humans : list[Human] = []
@@ -165,18 +203,14 @@ class CrowdWorld(dm_env.Environment):
         self._discount = discount
         self._reward_func_id = reward_func_ids
         self._reward_func_tabel = {0:self.point_goal_navi_reward,
-                                   1:self.human_tracking_reward,
                                    2:self.pass_human_reward,
                                    3:self.follow_wall_reward}
-        self._random_goal_velocity = random_goal_velocity
-        self._penalty_collision = -0.25
-        self._reward_goal = 0.25
-        self._goal_factor = 0.2
-        self._goal_range = 0.3
-        self._reward_velo = 0.25
-        self._velo_factor = 0.2
-        self._velo_range = 0.1
-        self._discomfort_penalty_factor = 1.0
+        self._penalty_collision = cfg.penalty_collision
+        self._reward_goal = cfg.reward_goal
+        self._goal_factor = cfg.goal_factor
+        self._goal_range = cfg.goal_range
+        self._velo_factor = cfg.velo_factor
+        self._discomfort_penalty_factor = cfg.discomfort_penalty_factor
         self._discomfort_dist = discomfort_dist
         self._forbiden_zone_y = forbiden_zone_y
         self._to_wall_dis = to_wall_dist
@@ -193,13 +227,13 @@ class CrowdWorld(dm_env.Environment):
                           'test': 1000}
         self.case_counter = {'train': 0, 'test': 0, 'val': 0}
         self._state = None
-        self._current_scan = None
-        self._goal_state = None
-        self.global_time = None
-        self._num_episode_steps = 0
+        self._current_scan = np.zeros(n_laser, dtype=np.float32)
+        # self._goal_state = None
+        self.global_time : float = 0
+        self._num_episode_steps : int = 0
         self._max_episode_length = max_episode_length
-        self._last_dg = None
-        self.last_reward = None
+        self._last_dg : float = 0.
+        self.last_reward : tp.Optional[float] = None
 
         # for visualization
         self.scan_intersection = None
@@ -209,8 +243,8 @@ class CrowdWorld(dm_env.Environment):
     def init_render_ax(self,ax):
         if ax is None:
             fig, ax = plt.subplots(figsize=(5,5)) 
-        ax.set_xlim(-self._map_size/2.-1,self._map_size/2.+1)
-        ax.set_ylim(-self._map_size/2.-1,self._map_size/2.+1)
+        plt.xlim(-self._map_size/2.-1,self._map_size/2.+1)
+        plt.ylim(-self._map_size/2.-1,self._map_size/2.+1)
         self.render_axis = ax
         # if self.config.env.render:
         #     plt.ion()
@@ -229,22 +263,26 @@ class CrowdWorld(dm_env.Environment):
             # occu_map = obs[:4096].reshape((64,64))
             # min_dist = self.task["discomfort_dist"]
             # if min_dist == 0.2: TODO
+
+        self._last_dg = dg # type: ignore
+
         if action[0]>self._speed_limit:
             reward -= self._velo_factor * (action[0]-self._speed_limit)
                 
         return reward,done 
-    def human_tracking_reward(self,action):
-        #np.array([dg,vx,vy,dgtheta,dgv,self.robot.radius],dtype=np.float32)
-        done = False
-        reward = 0
+    # def human_tracking_reward(self,action):
+    #     #np.array([dg,vx,vy,dgtheta,dgv,self.robot.radius],dtype=np.float32)
+    #     done = False
+    #     reward = 0
 
-        dxy = np.array(self.robot.get_goal_position())-np.array(self.robot.get_position())
-        dg = np.linalg.norm(dxy)
-        dgtheta = self.robot.goal_theta-self.robot.theta
-        dgv = self.robot.goal_v-np.linalg.norm(np.array([self.robot.vx,self.robot.vy]))
-        reward = self._goal_factor*(np.exp(-2*dg)+np.exp(-1*dgtheta))+self._velo_factor*np.exp(-0.1*dgv)
+    #     dxy = np.array(self.robot.get_goal_position())-np.array(self.robot.get_position())
+    #     dg = np.linalg.norm(dxy)
+    #     dgtheta = self.robot.goal_theta-self.robot.theta
+    #     dgv = self.robot.goal_v-np.linalg.norm(np.array([self.robot.vx,self.robot.vy]))
+    #     reward = self._goal_factor*(np.exp(-2*dg)+np.exp(-1*dgtheta))+self._velo_factor*np.exp(-0.1*dgv)
 
-        return reward,done #TODO
+    #     return reward,done #TODO
+
     def pass_human_reward(self,action):
         reward,done = self.point_goal_navi_reward(action)
 
@@ -285,6 +323,8 @@ class CrowdWorld(dm_env.Environment):
         return reward,done #TODO
     
     def cal_reward(self,action):
+        # TODO cal goal reward and collision panelty as default 
+        # import auxilliary task from goal class and cal reward
         reward, done =self._reward_func_tabel[self._reward_func_id](action)
         safety_penalty = 0.0
         for i, human in enumerate(self.humans): 
@@ -295,11 +335,15 @@ class CrowdWorld(dm_env.Environment):
         return reward, done
     
     def randomize_map(self):
+        # reset map
+        self._layout= {"polygon":[],"vertices":[],"boundary":None}
+
         map_boundary = LinearRing( ((-self._map_size/2.-1, self._map_size/2.+1), 
                                     (self._map_size/2.+1, self._map_size/2.+1),
                                     (self._map_size/2.+1, -self._map_size/2.-1),
                                     (-self._map_size/2.-1,-self._map_size/2.-1)) )
-        map_ = {"polygon":[],"vertices":[],"boundary":map_boundary}
+        #map_ = {"polygon":[],"vertices":[],"boundary":map_boundary}
+        self._layout["boundary"] = map_boundary
         #gen triangle
         x = (np.random.random() - 0.5)*self._map_size
         y = (np.random.random() - 0.5)*self._map_size
@@ -328,17 +372,17 @@ class CrowdWorld(dm_env.Environment):
         boundary_polygon = triangle.union(rectangle).union(hex)
         if isinstance(boundary_polygon,MultiPolygon):
             for polygon in boundary_polygon.geoms:
-                map_["polygon"].append(polygon)
+                self._layout["polygon"].append(polygon)
                 x, y = polygon.exterior.xy
                 x,y = list(x),list(y)
-                map_["vertices"].append([(x[i],y[i]) for i in range(len(x))])
+                self._layout["vertices"].append([(x[i],y[i]) for i in range(len(x))])
         else:
             # Plot the boundary polygon
-            map_["polygon"].append(boundary_polygon)
+            self._layout["polygon"].append(boundary_polygon)
             x, y = boundary_polygon.exterior.xy
             x,y= list(x),list(y)
-            map_["vertices"].append([(x[i],y[i]) for i in range(len(x))])
-        return map_
+            self._layout["vertices"].append([(x[i],y[i]) for i in range(len(x))])
+        return 
     
     def generate_human(self, human=None, non_stop=False, square=False):
         if human is None:
@@ -392,12 +436,12 @@ class CrowdWorld(dm_env.Environment):
         return human
     
     def generate_robot(self):
-        if self._random_goal_velocity:
-            goal_theta = (np.random.random() - 0.5) * np.pi *2
-            goal_v = np.random.random() * self.robot.v_pref
-        else:
-            goal_theta = np.pi/2.
-            goal_v = 0.
+        # if self._random_goal_velocity: #TODO add goal velo
+        #     goal_theta = (np.random.random() - 0.5) * np.pi *2
+        #     goal_v = np.random.random() * self.robot.v_pref
+        # else:
+        goal_theta = np.pi/2.
+        goal_v = 0.
         while True:
             angle = np.random.random() * np.pi * 2
             # add some noise to simulate all the possible cases robot could meet with human
@@ -462,7 +506,7 @@ class CrowdWorld(dm_env.Environment):
         
         self.random_seed = base_seed[self.phase] + self.case_counter[self.phase]
         np.random.seed(self.random_seed)
-        self._layout= self.randomize_map()
+        self.randomize_map()
 
         # set robot init state, goal pos and goal speed
         self.generate_robot()
@@ -481,7 +525,8 @@ class CrowdWorld(dm_env.Environment):
             agent.policy.time_step = self._time_step
 
         self._state = self.get_obs()
-        self._last_dg = self._state[-6]
+        dxy = np.array(self.robot.get_goal_position())-np.array(self.robot.get_position())
+        self._last_dg = np.linalg.norm(dxy)
     
         return ExtendedTimeStep(
             step_type=dm_env.StepType.FIRST,
@@ -616,16 +661,19 @@ class CrowdWorld(dm_env.Environment):
                     semantic_occu_map[grid_x,grid_y,1] = 1.0
 
             dxy = np.array(self.robot.get_goal_position())-np.array(self.robot.get_position())
-            dg = np.linalg.norm(dxy)
-            da = np.arctan2(dxy[1],dxy[0])
-            vx = (self.robot.vx * np.cos(da) + self.robot.vy * np.sin(da))
-            vy = (self.robot.vy * np.cos(da) - self.robot.vx * np.sin(da))
+            da = self.robot.theta
+            robot_v = np.sqrt(self.robot.vx**2+self.robot.vy**2)
+            robot_w = self.robot.w
+            # transform dxy to base frame
+            gx = (dxy[0] * np.cos(da) + dxy[1] * np.sin(da))
+            gy = (dxy[1] * np.cos(da) - dxy[0] * np.sin(da))
 
             dgtheta = self.robot.goal_theta-self.robot.theta
-            dgv = self.robot.goal_v-np.linalg.norm(np.array([self.robot.vx,self.robot.vy]))
+            # dgv = self.robot.goal_v-np.linalg.norm(np.array([self.robot.vx,self.robot.vy]))
 
-            return np.hstack([semantic_occu_map[...,1].flatten()+semantic_occu_map[...,0].flatten()*0.5,
-                              np.array([dg,vx,vy,dgtheta,dgv,self.robot.radius],dtype=np.float32)]) 
+            return np.hstack([semantic_occu_map[...,1].flatten(),
+                              semantic_occu_map[...,0].flatten(),
+                              np.array([gx,gy,dgtheta,robot_v,robot_w,self.robot.radius],dtype=np.float32)]) 
         else:
             # rethink of dg,vx,vy,dgtheta,dgv,self.robot.radius
             # there is no information about theta of the robot in goal coordinate
@@ -681,7 +729,6 @@ class CrowdWorld(dm_env.Environment):
                 step_type = dm_env.StepType.LAST
             discount = self._discount
 
-        self._last_dg = self._state[-6]
         self.last_reward = reward
 
         return ExtendedTimeStep(
@@ -728,18 +775,7 @@ class CrowdWorld(dm_env.Environment):
         # for agent in self.humans + [self.robot]:
         #     x,y = agent.collider.exterior.xy
         #     ax.plot(x, y)
-        if return_rgb:
-            fig = plt.gcf()
-            plt.axis('tight')
-            # plt.subplots_adjust(0, 0, 1, 1, 0, 0)
-            fig.canvas.draw()
-            data = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-            w, h = fig.canvas.get_width_height()
-            data = data.reshape((h, w, 3))
-            plt.close(fig)
-            return data
-        else:
-            if self.scan_intersection is not None:
+        if self.scan_intersection is not None:
                 ii = 0
                 lines = []
                 while ii < n_laser:
@@ -748,6 +784,18 @@ class CrowdWorld(dm_env.Environment):
                 lc = mc.LineCollection(lines,linewidths=1,linestyles='--',alpha=0.2)
                 ax.add_artist(lc)
                 artists.append(lc)
+        if return_rgb:
+            fig = plt.gcf()
+            # plt.axis('tight')
+            # plt.subplots_adjust(0, 0, 1, 1, 0, 0)
+            fig.canvas.draw()
+            data = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+            w, h = fig.canvas.get_width_height()
+            data = data.reshape((h, w, 3))
+            for item in artists:
+                item.remove()
+            return data
+        else:
             plt.pause(0.1)
             
             for item in artists:
