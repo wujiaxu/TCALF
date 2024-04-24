@@ -43,7 +43,7 @@ from url_benchmark import utils
 # from url_benchmark import goals as _goals
 from controllable_navi import goals as _goals
 from url_benchmark.logger import Logger
-from url_benchmark.in_memory_replay_buffer import ReplayBuffer
+from controllable_navi.in_memory_replay_buffer import ReplayBuffer
 from url_benchmark.video import TrainVideoRecorder, VideoRecorder
 # from url_benchmark import agent as agents
 from controllable_navi import agent as agents
@@ -337,9 +337,11 @@ class BaseWorkspace(tp.Generic[C]):
         meta = _init_eval_meta(self)  # Don't work
         z_correl = 0.0
         # is_d4rl_task = self.cfg.task.split('_')[0] == 'd4rl'
+        # TODO add info to calculate success rate slp collision rate navi time
         actor_success: tp.List[float] = []
         while eval_until_episode(episode):
             time_step = self.eval_env.reset()
+            episode_step = 0
             # create custom reward if need be (if field exists)
             seed = 12 * self.cfg.num_eval_episodes + len(rewards)
             custom_reward = self._make_custom_reward(seed=seed)
@@ -365,8 +367,10 @@ class BaseWorkspace(tp.Generic[C]):
                         actor_success.extend(self.agent.actor_success)
                 if custom_reward is not None:
                     time_step.reward = custom_reward.from_env(self.eval_env)
-                total_reward += time_step.reward
+                # total_reward += time_step.reward
+                total_reward+= self.cfg.discount**episode_step*time_step.reward
                 step += 1
+                episode_step+=1
             # if is_d4rl_task:
             #     normalized_scores.append(self.eval_env.get_normalized_score(total_reward))
             rewards.append(total_reward)

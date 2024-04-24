@@ -152,6 +152,8 @@ class APSAgent(DDPGAgent):
         self.pbe = utils.PBE(rms, cfg.knn_clip, cfg.knn_k, cfg.knn_avg, cfg.knn_rms,
                              cfg.device)
         self.balancing_factor = cfg.balancing_factor
+        self.smerl_target = cfg.smerl_target
+        self.smerl_margin = cfg.smerl_margin
         # optimizers
         self.aps_opt = torch.optim.Adam(self.aps.parameters(), lr=self.lr)
 
@@ -227,7 +229,7 @@ class APSAgent(DDPGAgent):
 
         batch = replay_loader.sample(self.cfg.batch_size).to(self.device)
 
-        obs, action, extr_reward, discount, next_obs = batch.unpack()
+        obs, action, extr_reward, discount, next_obs, episode_return = batch.unpack_with_episode_return()
         task = batch.meta["task"]
 
         # augment and encode
@@ -249,8 +251,8 @@ class APSAgent(DDPGAgent):
                 metrics['intr_sf_reward'] = intr_sf_reward.mean().item()
 
             # TODO cal reward according to reture @ diayn_smerl
-            # accept = returns >= self._config.smerl_target - self._config.smerl_margin
-            reward = intr_reward + extr_reward*self.balancing_factor
+            accept = episode_return >= self.smerl_target - self.smerl_margin
+            reward = intr_reward*accept*self.balancing_factor + extr_reward
         else:
             reward = extr_reward
 

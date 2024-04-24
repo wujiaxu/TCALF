@@ -16,6 +16,7 @@ from dm_env import specs, TimeStep
 from tqdm import tqdm
 from url_benchmark.replay_buffer import EpisodeBatch
 from url_benchmark.dmc import ExtendedGoalTimeStep
+from controllable_navi.crowd_sim.utils.info import *
 
 Specs = tp.Sequence[specs.Array]
 logger = logging.getLogger(__name__)
@@ -104,6 +105,7 @@ class ReplayBuffer:
 
     def add(self, time_step: TimeStep, meta: tp.Mapping[str, np.ndarray]) -> None:
         dtype = np.float32
+        step_info = None
         # print(meta)->OrderedDict([('task', array([ 0.01439587, -0.09590689, -0.18284939,  0.20553997,  0.08937766,0.41374323,  0.26285544, -0.4683657 , -0.48206484, -0.4635691 ],dtype=float32))])
         # print(self._current_episode.keys())->dict_keys(['task', 'step_type', 'reward', 'discount', 'observation', 'physics', 'action'])
         for key, value in meta.items():
@@ -114,7 +116,17 @@ class ReplayBuffer:
                 value = np.full((1,), value, dtype=dtype)
             if isinstance(value, np.ndarray):
                 self._current_episode[field.name].append(np.array(value, dtype=dtype))
+            if isinstance(value,InfoList):
+                step_info = value
+        # if not time_step.last():
+        #     self._current_episode["done"].append(np.array([1],dtype=dtype))
         if time_step.last():
+            # self._current_episode["done"].append(np.array([0],dtype=dtype))
+            # TODO decide whether push the episode to memory buffer
+            # if step_info.contain(Timeout()):
+            #     # reset for next episode
+            #     self._current_episode = collections.defaultdict(list)
+            #     return
             if not hasattr(self, "_batch_names"):
                 self._batch_names = set(field.name for field in dataclasses.fields(ExtendedGoalTimeStep))
             for name, value_list in self._current_episode.items():
@@ -174,6 +186,7 @@ class ReplayBuffer:
         action = self._storage['action'][ep_idx, step_idx]
         next_obs = self._storage['observation'][ep_idx, step_idx]
         phy = self._storage['physics'][ep_idx, step_idx]
+        # done_mask = self._storage['done'][ep_idx, step_idx]# this can be identified by discount from env (1 for mid, 0 for last)
         episode_return = self._episodes_return[ep_idx]
         if custom_reward is not None:
             if hasattr(custom_reward,"task"):
@@ -214,7 +227,7 @@ class ReplayBuffer:
         if with_physics:
             additional["_physics"] = phy
         # TODO remove type ignore when working
-        return EpisodeBatch(obs=obs, goal=goal, action=action, reward=reward, discount=discount,
+        return EpisodeBatch(obs=obs, goal=goal, action=action, reward=reward, discount=discount, 
                             next_obs=next_obs, next_goal=next_goal, episode_return=episode_return,
                             future_obs=future_obs, future_goal=future_goal, meta=meta, **additional)
 

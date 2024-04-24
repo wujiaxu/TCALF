@@ -34,6 +34,8 @@ class EpisodeBatch(tp.Generic[T]):
     reward: T
     next_obs: T
     discount: T
+    episode_return: T
+    # done_mask: T
     meta: tp.Dict[str, T] = dataclasses.field(default_factory=dict)
     _physics: tp.Optional[T] = None
     goal: tp.Optional[T] = None
@@ -96,6 +98,12 @@ class EpisodeBatch(tp.Generic[T]):
         """
         return (self.obs, self.action, self.reward, self.discount, self.next_obs)
         # return (self.obs, self.action, self.reward, self.discount, self.next_obs, *self.meta)
+
+    # def unpack_with_done_info(self) -> tp.Tuple[T, T, T, T, T, T]:
+    #     return (self.obs, self.action, self.reward, self.discount, self.next_obs, self.done_mask)
+    
+    def unpack_with_episode_return(self) -> tp.Tuple[T, T, T, T, T, T]:
+        return (self.obs, self.action, self.reward, self.discount, self.next_obs, self.episode_return)
 
     def with_no_reward(self: B) -> B:
         reward = self.reward

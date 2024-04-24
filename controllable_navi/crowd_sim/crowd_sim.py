@@ -1,6 +1,6 @@
-import logging
-import random
-import math
+# import logging
+# import random
+# import math
 import typing as tp
 import dataclasses
 import shapely
@@ -14,23 +14,24 @@ import matplotlib.lines as mlines
 from matplotlib import patches
 import numpy as np
 from numpy.linalg import norm
+import copy
 
 from controllable_navi.crowd_sim.C_library.motion_plan_lib import *
-from controllable_navi.crowd_sim.policy.policy_factory import policy_factory
-from controllable_navi.crowd_sim.utils.state import tensor_to_joint_state, JointState,ExFullState
-from controllable_navi.crowd_sim.utils.action import ActionRot,ActionVW
+# from controllable_navi.crowd_sim.policy.policy_factory import policy_factory
+# from controllable_navi.crowd_sim.utils.state import tensor_to_joint_state, JointState,ExFullState
+from controllable_navi.crowd_sim.utils.action import ActionVW
 from controllable_navi.crowd_sim.utils.human import Human
 from controllable_navi.crowd_sim.utils.robot import Robot
 from controllable_navi.crowd_sim.utils.info import *
-from controllable_navi.crowd_sim.utils.utils import point_to_segment_dist
+# from controllable_navi.crowd_sim.utils.utils import point_to_segment_dist
 from controllable_navi.crowd_sim.utils.obstacle import *
 
 import dm_env
 from dm_env import specs
 import enum
-from url_benchmark.dmc import ExtendedTimeStep,TimeStep
+from url_benchmark.dmc import ExtendedTimeStep #,TimeStep
 from hydra.core.config_store import ConfigStore
-import omegaconf
+# import omegaconf
 
 # DEBUG = True
 # laser scan parameters
@@ -39,6 +40,10 @@ n_laser = 1800
 laser_angle_resolute = 0.003490659
 laser_min_range = 0.27
 laser_max_range = 6.0
+
+@dataclasses.dataclass
+class InformedTimeStep(ExtendedTimeStep):
+    info: tp.Any
 
 class ObservationType(enum.IntEnum):
     STATE_INDEX = enum.auto()
@@ -87,8 +92,8 @@ class CrowdSimConfig:
     robot_visible: bool = True
     robot_rotation_constrain: float = np.pi/6
 
-    penalty_collision: float = -2.
-    reward_goal: float = 0.25
+    penalty_collision: float = -0.25#2.
+    reward_goal: float = 0.25#2.
     goal_factor: float = 0.2
     goal_range: float = 0.3
     velo_factor: float = 0.2
@@ -99,7 +104,7 @@ cs = ConfigStore.instance()
 cs.store(group="crowd_sim", name="CrowdWorld", node=CrowdSimConfig)
 
 def build_crowdworld_task(task,phase,
-                         discount=0.9,
+                         discount=1.0,
                          observation_type=ObservationType.OCCU_MAP,
                          max_episode_length=200):
     cfg = CrowdSimConfig()
@@ -176,7 +181,7 @@ class CrowdWorld(dm_env.Environment):
                  cfg:CrowdSimConfig, 
                  config,
                observation_type=ObservationType.OCCU_FLOW,
-               discount=0.9,
+               discount=1.0,
                max_episode_length=None,
                forbiden_zone_y = 0.6,
                discomfort_dist = 0.2,
@@ -215,6 +220,7 @@ class CrowdWorld(dm_env.Environment):
         self._forbiden_zone_y = forbiden_zone_y
         self._to_wall_dis = to_wall_dist
         self._speed_limit = speed_limit
+        self._step_info = InfoList()
 
         self._observation_type = observation_type
         self._local_map_size = 8
@@ -258,6 +264,7 @@ class CrowdWorld(dm_env.Environment):
         if dg <self._goal_range:
                 reward = self._reward_goal
                 done = True
+                self._step_info.add(ReachGoal())
         else:
             reward += self._goal_factor * (self._last_dg-dg)
             # occu_map = obs[:4096].reshape((64,64))
@@ -268,8 +275,8 @@ class CrowdWorld(dm_env.Environment):
 
         if action[0]>self._speed_limit:
             reward -= self._velo_factor * (action[0]-self._speed_limit)
-                
-        return reward,done 
+            self._step_info.add(ViolateSpeedLimit())
+        return reward,done
     # def human_tracking_reward(self,action):
     #     #np.array([dg,vx,vy,dgtheta,dgv,self.robot.radius],dtype=np.float32)
     #     done = False
@@ -312,26 +319,37 @@ class CrowdWorld(dm_env.Environment):
             if px_other>1 and px_other<4 and abs(direction_diff)>3.*np.pi/4.:
                 if self._forbiden_zone_y<0 and py_other<0 and py_other>-2: #right
                     reward -= 0.05
+                    self._step_info.add(ViolateSidePreference('right'))
                 if self._forbiden_zone_y>0 and py_other>0 and py_other<2: #left
                     reward -= 0.05
+                    self._step_info.add(ViolateSidePreference('left'))
 
         return reward,done #TODO
     def follow_wall_reward(self,action):
         done = False
         reward = 0
-        
         return reward,done #TODO
     
     def cal_reward(self,action):
         # TODO cal goal reward and collision panelty as default 
         # import auxilliary task from goal class and cal reward
-        reward, done =self._reward_func_tabel[self._reward_func_id](action)
+        reward, done= self._reward_func_tabel[self._reward_func_id](action)
+        if done:
+            return reward, done
         safety_penalty = 0.0
+        discomfort = False
+        closest_dist = self._discomfort_dist
         for i, human in enumerate(self.humans): 
-            closest_dist = norm(np.array([human.px - self.robot.px,human.py - self.robot.py]))
-            if closest_dist < self._discomfort_dist:
-                safety_penalty = safety_penalty + (closest_dist - self._discomfort_dist) #value<0
+            dist = norm(np.array([human.px - self.robot.px,human.py - self.robot.py]))
+            if dist < self._discomfort_dist:
+                discomfort = True
+                safety_penalty = safety_penalty + (dist - self._discomfort_dist) #value<0
+                if closest_dist>dist:
+                    closest_dist=dist
         reward += self._discomfort_penalty_factor*safety_penalty
+        if discomfort:
+            self._step_info.add(Discomfort(closest_dist))
+
         return reward, done
     
     def randomize_map(self):
@@ -527,13 +545,16 @@ class CrowdWorld(dm_env.Environment):
         self._state = self.get_obs()
         dxy = np.array(self.robot.get_goal_position())-np.array(self.robot.get_position())
         self._last_dg = np.linalg.norm(dxy)
+        self._step_info.reset()
+        self._step_info.add(Nothing())
     
-        return ExtendedTimeStep(
+        return InformedTimeStep(
             step_type=dm_env.StepType.FIRST,
             action=np.array([0,0]),
             reward=0.0,
             discount=self._discount,
             observation=self._state,
+            info = copy.deepcopy(self._step_info),
             # physics=np.array(physics,dtype=np.float32),
             )
     
@@ -711,32 +732,40 @@ class CrowdWorld(dm_env.Environment):
         dmin =np.min(self._current_scan)
         if dmin <= self.robot.radius:
             collision = True
-        
+            
+        self._step_info.reset()
         # cal reward
         step_type = dm_env.StepType.MID
+        discount = self._discount
         if (self._max_episode_length is not None and
             self._num_episode_steps >= self._max_episode_length):
-          reward = 0
-          step_type = dm_env.StepType.LAST
-          discount = self._discount
+            reward = 0
+            step_type = dm_env.StepType.LAST
+            discount = 0
+            self._step_info.add(Timeout())
         elif collision:
             reward = self._penalty_collision
-            discount = self._discount
+            discount = 0
             step_type = dm_env.StepType.LAST
+            self._step_info.add(Collision())
         else:
-            reward,done = self.cal_reward(action)
+            reward,done= self.cal_reward(action)
             if done:
                 step_type = dm_env.StepType.LAST
-            discount = self._discount
+                discount = 0
+            
 
         self.last_reward = reward
+        if self._step_info.empty():
+            self._step_info.add(Nothing())
 
-        return ExtendedTimeStep(
+        return InformedTimeStep(
             step_type=step_type,
             action=action,
             reward=np.float32(reward),
             discount=discount,
             observation=self._state,
+            info=copy.deepcopy(self._step_info)
             # physics=np.array(physics,dtype=np.float32),
             )
 
