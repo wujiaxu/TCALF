@@ -1,6 +1,7 @@
 class InfoList(object):
     def __init__(self):
         self.info_list = []
+        self.task_info = {"sx":None,"sy":None,"gx":None,"gy":None}
     def add(self,info):
         self.info_list.append(str(info))
     def contain(self,info):
@@ -9,6 +10,11 @@ class InfoList(object):
         self.info_list.clear()
     def empty(self):
         return len(self.info_list)==0
+    def get_task_info(self,sx,sy,gx,gy):
+        self.task_info["sx"] = sx
+        self.task_info["sy"] = sy
+        self.task_info["gx"] = gx
+        self.task_info["gy"] = gy
 
 class Timeout(object):
     def __init__(self):

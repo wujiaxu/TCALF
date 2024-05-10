@@ -56,7 +56,7 @@ class Agent(object):
         :return:
         """
         self.v_pref = np.random.uniform(0.5, 1.5)
-        self.radius = np.random.uniform(0.3, 0.5)
+        self.radius = np.random.uniform(0.2, 0.4)
 
     def set(self, px:float, py:float, gx:float, gy:float, vx:float, vy:float, theta:float, w:float=0.,
             radius:tp.Optional[float]=None, v_pref:tp.Optional[float]=None,goal_theta:tp.Optional[float]=None,goal_v:tp.Optional[float]=None):
@@ -142,9 +142,9 @@ class Agent(object):
             px = self.px + action.vx * delta_t
             py = self.py + action.vy * delta_t
         elif self.kinematics == 'unicycle':
-            theta = self.theta + action.w*delta_t
-            px = self.px + np.cos(theta) * action.v * delta_t
-            py = self.py + np.sin(theta) * action.v * delta_t
+            self.theta = (self.theta + action.w * delta_t) % (2 * np.pi)
+            px = self.px + np.cos(self.theta) * action.v * delta_t
+            py = self.py + np.sin(self.theta) * action.v * delta_t
         else:
             theta = self.theta + action.r
             px = self.px + np.cos(theta) * action.v * delta_t
@@ -164,7 +164,6 @@ class Agent(object):
                 self.vx = action.vx
                 self.vy = action.vy
             elif self.kinematics == 'unicycle':
-                self.theta = (self.theta + action.w * self.time_step/self.time_sampling) % (2 * np.pi)
                 self.vx = action.v * np.cos(self.theta)
                 self.vy = action.v * np.sin(self.theta)
                 self.w  = action.w

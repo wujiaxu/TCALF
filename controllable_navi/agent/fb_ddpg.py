@@ -27,7 +27,7 @@ from url_benchmark.dmc import TimeStep
 from url_benchmark import goals as _goals
 from .ddpg import MetaDict
 from .fb_modules import IdentityMap
-from .ddpg import Encoder,CrowdEncoderOM,CrowdEncoderCOM
+from .ddpg import Encoder,CrowdEncoderOM,CrowdEncoderOF
 from .fb_modules import Actor, DiagGaussianActor, ForwardMap, BackwardMap, OnlineCov
 
 

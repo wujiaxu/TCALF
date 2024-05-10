@@ -123,9 +123,13 @@ class ReplayBuffer:
         if time_step.last():
             # self._current_episode["done"].append(np.array([0],dtype=dtype))
             # TODO decide whether push the episode to memory buffer
-            # if step_info.contain(Timeout()):
-            #     # reset for next episode
+            # if (not time_step.info.contain(ReachGoal())) and (not time_step.info.contain(Collision())):
             #     self._current_episode = collections.defaultdict(list)
+            #     # not to add if the agent not reach goal or collide
+            #     # self._collected_episodes += 1
+            #     # self._idx = (self._idx + 1) % self._max_episodes
+            #     # self._full = self._full or self._idx == 0
+            #     self._episodes_selection_probability = None
             #     return
             if not hasattr(self, "_batch_names"):
                 self._batch_names = set(field.name for field in dataclasses.fields(ExtendedGoalTimeStep))
@@ -144,7 +148,7 @@ class ReplayBuffer:
                 # TODO add G on episode end
                 if name == "reward":
                     self._episodes_return[self._idx] = sum([r*self._discount**i for i,r in enumerate(values.flatten().tolist())])
-
+            
             self._episodes_length[self._idx] = len(self._current_episode['discount']) - 1  # compensate for the dummy transition at the beginning
             if self._episodes_length[self._idx] != self._episodes_length[self._idx - 1] and self._episodes_length[self._idx - 1] != 0:
                 self._is_fixed_episode_length = False
@@ -158,6 +162,21 @@ class ReplayBuffer:
     def avg_episode_length(self) -> int:
         return round(self._episodes_length[:len(self)].mean())
 
+    def sample_recent(self,sample_num)->tp.Tuple[np.ndarray,np.ndarray]:
+        # if self._idx < sample_num:
+        if self._full:
+            # sample_num = 20; _idx=10
+            # 10 ... 0 -1 ... -9
+            ep_idx = [(self._idx-i) for i in range(sample_num)]
+        else:
+            # sample_num = 20; _idx=10
+            # 10 ... 0
+            ep_idx = [(self._idx-i) for i in range(sample_num) if self._idx>=i]
+        # ep_idx = np.arange(len(self._episodes_length))[-sample_num:] if len(self._episodes_length)>sample_num else np.arange(len(self._episodes_length))
+        init_obs = self._storage['observation'][ep_idx, 0]
+        episode_return = self._episodes_return[ep_idx]
+        return init_obs, episode_return
+    
     def sample(self, batch_size, custom_reward: tp.Optional[tp.Any] = None, with_physics: bool = False) -> EpisodeBatch:
         if not hasattr(self, "_batch_names"):
             self._batch_names = set(field.name for field in dataclasses.fields(ExtendedGoalTimeStep))
@@ -169,7 +188,9 @@ class ReplayBuffer:
             ep_idx = np.random.randint(0, len(self), size=batch_size)
         else:
             if self._episodes_selection_probability is None:
-                self._episodes_selection_probability = self._episodes_length / self._episodes_length.sum()
+                # long episodes are more likely to be sampled.... shit!!!! stupid setting
+                sample_prob = np.where(self._episodes_length==0,0.,1.)
+                self._episodes_selection_probability = sample_prob / sample_prob.sum()
             ep_idx = np.random.choice(np.arange(len(self._episodes_length)), size=batch_size, p=self._episodes_selection_probability)
 
         eps_lengths = self._episodes_length[ep_idx]
@@ -191,11 +212,12 @@ class ReplayBuffer:
         if custom_reward is not None:
             if hasattr(custom_reward,"task"):
                 reward = []
+                # TODO debug action rescale, modify collision case processing and merge it to compute reward
                 for i in range(len(step_idx)):
-                    if self._storage['reward'][ep_idx[i], step_idx[i]] == -0.25:
-                        reward.append(-0.25)
+                    if self._storage['reward'][ep_idx[i], step_idx[i]] == -1.:
+                        reward.append(-1.)
                     else:
-                        reward.append(custom_reward.compute_reward(obs[i],action[i]*np.array([1.0,np.pi/6]),next_obs[i],phy[i])) #need rescale action by v_pref and w_constrain
+                        reward.append(custom_reward.compute_reward(obs[i],action[i]*np.array([0.5,np.pi/2])+np.array([0.5,0.]),next_obs[i],phy[i])) #need rescale action by v_pref and w_constrain
                 reward = np.array(reward).astype(np.float32)
             else:
                 reward = np.array([[custom_reward.from_physics(p)] for p in phy], dtype=np.float32)

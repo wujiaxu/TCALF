@@ -42,12 +42,13 @@ from dm_env import specs
 from url_benchmark import utils
 # from url_benchmark import goals as _goals
 from controllable_navi import goals as _goals
-from url_benchmark.logger import Logger
+from controllable_navi.logger import Logger
 from controllable_navi.in_memory_replay_buffer import ReplayBuffer
 from url_benchmark.video import TrainVideoRecorder, VideoRecorder
 # from url_benchmark import agent as agents
 from controllable_navi import agent as agents
 from controllable_navi import crowd_sim as crowd_sims
+from controllable_navi.crowd_sim.utils.info import *
 # from url_benchmark.d4rl_benchmark import D4RLReplayBufferBuilder, D4RLWrapper
 # from url_benchmark.gridworld.env import build_gridworld_task
 
@@ -63,9 +64,9 @@ torch.backends.cudnn.benchmark = True
 @dataclasses.dataclass
 class Config:
     agent: tp.Any
-    # crowd_sim: tp.Any TODO
+    crowd_sim: tp.Any 
     # misc
-    seed: int = 1
+    seed: int = 11
     device: str = "cuda"
     save_video: bool = False
     use_tb: bool = False
@@ -105,7 +106,7 @@ class PretrainConfig(Config):
     # mode
     reward_free: bool = True
     # train settings
-    num_train_frames: int = 2000010#2000010
+    num_train_frames: int = 4000010#2000010 #TODO need more step for converge when goal reward is 0.25
     # snapshot
     eval_every_frames: int = 10000
     load_replay_buffer: tp.Optional[str] = None
@@ -134,7 +135,7 @@ def make_agent(
     return hydra.utils.instantiate(cfg)
 
 
-C = tp.TypeVar("C", bound=Config)
+C = tp.TypeVar("C", bound=Config) # Can be any subtype of Config
 
 
 def _update_legacy_class(obj: tp.Any, classes: tp.Sequence[tp.Type[tp.Any]]) -> tp.Any:
@@ -239,7 +240,7 @@ class BaseWorkspace(tp.Generic[C]):
         self.domain = task.split('_', maxsplit=1)[0]
 
         self.train_env = self._make_env()
-        self.eval_env = self._make_env()
+        self.eval_env = self._make_env(phase='val')
         # TODO debug RuntimeError: mat1 and mat2 shapes cannot be multiplied (1024x4113 and 4114x1024) aps.critic
         # print(self.train_env.observation_spec(),self.train_env.action_spec())
         # crowd navi
@@ -306,11 +307,11 @@ class BaseWorkspace(tp.Generic[C]):
 
         self.reward_cls: tp.Optional[_goals.BaseReward] = None
 
-    def _make_env(self) -> dmc.EnvWrapper:
+    def _make_env(self,phase='train') -> dmc.EnvWrapper:
         # cfg = self.cfg
         if self.domain == "crowdnavi":
             
-            return dmc.EnvWrapper(crowd_sims.build_crowdworld_task(self.cfg.task.split('_')[1],"train"))
+            return dmc.EnvWrapper(crowd_sims.build_crowdworld_task(self.cfg.crowd_sim,self.cfg.task.split('_')[1],phase,discount=self.cfg.discount,observation_type=self.cfg.obs_type))
         else:
             raise NotImplementedError
         # return dmc.make(cfg.task, cfg.obs_type, cfg.frame_stack, cfg.action_repeat, cfg.seed,
@@ -330,6 +331,7 @@ class BaseWorkspace(tp.Generic[C]):
 
     def eval(self) -> None:
         step, episode = 0, 0
+        success_num = 0
         eval_until_episode = utils.Until(self.cfg.num_eval_episodes)
         physics_agg = dmc.PhysicsAggregator()
         rewards: tp.List[float] = []
@@ -350,7 +352,7 @@ class BaseWorkspace(tp.Generic[C]):
             # if self.domain == "grid":
             #     meta = _init_eval_meta(self)
             total_reward = 0.0
-            self.video_recorder.init(self.eval_env, enabled=(episode == 0))
+            self.video_recorder.init(self.eval_env, enabled=True) #enabled=(episode == 0) force the recorder only save episode 0
             while not time_step.last():
                 with torch.no_grad(), utils.eval_mode(self.agent):
                     action = self.agent.act(time_step.observation,
@@ -373,9 +375,10 @@ class BaseWorkspace(tp.Generic[C]):
                 episode_step+=1
             # if is_d4rl_task:
             #     normalized_scores.append(self.eval_env.get_normalized_score(total_reward))
+            success_num = success_num+1 if time_step.info.contain(ReachGoal()) else success_num #this seemly no working!! TODO debug
             rewards.append(total_reward)
             episode += 1
-            self.video_recorder.save(f'{self.global_frame}.mp4')
+            self.video_recorder.save(f'{self.global_frame}_{episode}.mp4')
 
         self.eval_rewards_history.append(float(np.mean(rewards)))
         with self.logger.log_and_dump_ctx(self.global_frame, ty='eval') as log:
@@ -388,6 +391,7 @@ class BaseWorkspace(tp.Generic[C]):
             log('episode', self.global_episode)
             log('z_correl', z_correl / episode)
             log('step', self.global_step)
+            log('success rate', float(success_num)/self.cfg.num_eval_episodes)
             if actor_success:
                 log('actor_sucess', float(np.mean(actor_success)))
             if isinstance(self.agent, agents.FBDDPGAgent):
@@ -456,7 +460,7 @@ class BaseWorkspace(tp.Generic[C]):
 
     def finalize(self) -> None:
         print("Running final test", flush=True)
-        repeat = self.cfg.final_tests
+        repeat = 1 #self.cfg.final_tests
         if not repeat:
             return
 
@@ -473,20 +477,27 @@ class BaseWorkspace(tp.Generic[C]):
             # "cheetah": ['walk', 'walk_backward', 'run', 'run_backward'],
             # "quadruped": ['stand', 'walk', 'run', 'jump'],
             # "walker": ['stand', 'walk', 'run', 'flip'],
-            "crowdnavi":['PointGoalNavi','PassLeftSide','PassRightSide','AwayFromHuman','LowSpeed'] #'FollowWall',
+            "crowdnavi":[
+                        #  'PointGoalNavi',
+                         'PassLeftSide',
+                         'PassRightSide',
+                        #  'AwayFromHuman',
+                        #  'LowSpeed'
+                         ] #'FollowWall',
         }
         if self.domain not in domain_tasks:
             return
         eval_hist = self.eval_rewards_history
         rewards = {}
         for name in domain_tasks[self.domain]:
+            self.global_step+=1
             task = "_".join([self.domain, name])
             self.cfg.task = task
             self.cfg.custom_reward = task  # for the replay buffer
             self.cfg.seed += 1  # for the sake of avoiding similar seeds
-            self.eval_env = self._make_env()
+            self.eval_env = self._make_env(phase='test')
             self.eval_rewards_history = []
-            self.cfg.num_eval_episodes = 1
+            self.cfg.num_eval_episodes = 10
             for _ in range(repeat):
                 self.eval()
             rewards[task] = self.eval_rewards_history
@@ -539,6 +550,12 @@ class Workspace(BaseWorkspace[PretrainConfig]):
 
         while train_until_step(self.global_step):
             if time_step.last():
+                success_rate = 1.0 if time_step.info.contain(ReachGoal()) else 0.0
+                task_info = time_step.info.task_info
+                start_goal_dist = np.sqrt((task_info["gx"]-task_info["sx"])**2+(task_info["gy"]-task_info["sy"])**2)
+                # if start_goal_dist < 6:
+                #     print(task_info)
+                #     raise ValueError
                 self.global_episode += 1
                 self.train_video_recorder.save(f'{self.global_frame}.mp4')
                 # wait until all the metrics schema is populated
@@ -556,6 +573,10 @@ class Workspace(BaseWorkspace[PretrainConfig]):
                         log('buffer_size', len(self.replay_loader))
                         log('step', self.global_step)
                         log('z_correl', z_correl)
+                        log('start goal dist',start_goal_dist)
+                        log('final goal dist',time_step.observation[-5])
+                        log('success rate',success_rate)
+                        # TODO record success rate
 
                         for key, val in physics_agg.dump():
                             log(key, val)
@@ -584,7 +605,8 @@ class Workspace(BaseWorkspace[PretrainConfig]):
                 #     self.eval_grid_goals()
                 # else:
                 self.eval()
-            meta = self.agent.update_meta(meta, self.global_step, time_step, finetune=False, replay_loader=self.replay_loader)
+            # TODO consider whether comment out meta update is ok? (currently I want one episode one z, so I don't update meta during episode)
+            # meta = self.agent.update_meta(meta, self.global_step, time_step, finetune=False, replay_loader=self.replay_loader)
             # sample action
             with torch.no_grad(), utils.eval_mode(self.agent):
                 action = self.agent.act(time_step.observation,
@@ -604,7 +626,6 @@ class Workspace(BaseWorkspace[PretrainConfig]):
 
             # take env step
             time_step = self.train_env.step(action)
-            # print(time_step.observation.shape) -> (4102)
             physics_agg.add(self.train_env)
             episode_reward += self.cfg.discount**episode_step*time_step.reward #NEW: consider discount
             self.replay_loader.add(time_step, meta)

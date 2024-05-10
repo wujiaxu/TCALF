@@ -16,6 +16,8 @@ import numpy as np
 from numpy.linalg import norm
 import copy
 
+from torch import Value
+
 from controllable_navi.crowd_sim.C_library.motion_plan_lib import *
 # from controllable_navi.crowd_sim.policy.policy_factory import policy_factory
 # from controllable_navi.crowd_sim.utils.state import tensor_to_joint_state, JointState,ExFullState
@@ -36,8 +38,8 @@ from hydra.core.config_store import ConfigStore
 # DEBUG = True
 # laser scan parameters
 # number of all laser beams
-n_laser = 1800
-laser_angle_resolute = 0.003490659
+n_laser = 720
+laser_angle_resolute = 0.008726646
 laser_min_range = 0.27
 laser_max_range = 6.0
 
@@ -80,6 +82,8 @@ class CrowdSimConfig:
     name: str = "CrowdWorld"
     max_human_num: int = 6 
     map_size: float = 10
+    with_static_obstacle: bool = True
+    regen_map_every: int = 500
 
     human_policy: str = 'socialforce'
     human_radius: float = 0.3
@@ -90,24 +94,33 @@ class CrowdSimConfig:
     robot_radius: float = 0.3
     robot_v_pref: float = 1.0
     robot_visible: bool = True
-    robot_rotation_constrain: float = np.pi/6
+    robot_rotation_constrain: float = np.pi/2
 
-    penalty_collision: float = -0.25#2.
-    reward_goal: float = 0.25#2.
-    goal_factor: float = 0.2
+    penalty_collision: float = -1#2.
+    reward_goal: float = 10#2.
+    goal_factor: float = 10
     goal_range: float = 0.3
     velo_factor: float = 0.2
     discomfort_penalty_factor: float = 1.0
 
+    local_map_size: float = 8.0
+    grid_size: float = 0.25
 
 cs = ConfigStore.instance()
 cs.store(group="crowd_sim", name="CrowdWorld", node=CrowdSimConfig)
 
-def build_crowdworld_task(task,phase,
+def build_crowdworld_task(cfg:CrowdSimConfig, task,phase,
                          discount=1.0,
-                         observation_type=ObservationType.OCCU_MAP,
+                         observation_type="of",
                          max_episode_length=200):
-    cfg = CrowdSimConfig()
+    if observation_type == "of":
+        obs_type = ObservationType.OCCU_FLOW
+    elif observation_type =="om":
+        obs_type = ObservationType.OCCU_MAP
+    elif observation_type =="raw_scan":
+        obs_type = ObservationType.RAW_SCAN
+    else:
+        raise NotImplementedError
 
     # currently robot and human class need Config class to init
     class Config(object):
@@ -172,7 +185,7 @@ def build_crowdworld_task(task,phase,
                     "speed_limit":0.5,
                 }
                             }
-    return CrowdWorld(phase,cfg, config,observation_type,discount,max_episode_length,**tasks_specifications[task])
+    return CrowdWorld(phase,cfg, config,obs_type,discount,max_episode_length,**tasks_specifications[task])
 
 
 class CrowdWorld(dm_env.Environment):
@@ -196,7 +209,16 @@ class CrowdWorld(dm_env.Environment):
         self.physics = CrowdPhysics(self)
 
         self._map_size = self.config.env.map_size #circle
+        self._with_static_obstacle = cfg.with_static_obstacle
+        self._regen_map_every = cfg.regen_map_every
         self._layout: dict = {"polygon":[],"vertices":[],"boundary":None}
+        map_boundary = LinearRing( ((-self._map_size/2.-1, self._map_size/2.+1), 
+                                    (self._map_size/2.+1, self._map_size/2.+1),
+                                    (self._map_size/2.+1, -self._map_size/2.-1),
+                                    (-self._map_size/2.-1,-self._map_size/2.-1)) )
+        #map_ = {"polygon":[],"vertices":[],"boundary":map_boundary}
+        self._layout["boundary"] = map_boundary
+
         self._human_num = self.config.env.human_num
         self._time_step = 0.25
         self.robot = Robot(config,"robot")
@@ -221,10 +243,9 @@ class CrowdWorld(dm_env.Environment):
         self._to_wall_dis = to_wall_dist
         self._speed_limit = speed_limit
         self._step_info = InfoList()
-
         self._observation_type = observation_type
-        self._local_map_size = 8
-        self._grid_size = 0.25
+        self._local_map_size = cfg.local_map_size
+        self._grid_size = cfg.grid_size
         self._occu_map_size = int((self._local_map_size//self._grid_size)**2) 
 
 
@@ -234,23 +255,27 @@ class CrowdWorld(dm_env.Environment):
         self.case_counter = {'train': 0, 'test': 0, 'val': 0}
         self._state = None
         self._current_scan = np.zeros(n_laser, dtype=np.float32)
+        self._semantic_occ_map_queue = []
         # self._goal_state = None
         self.global_time : float = 0
         self._num_episode_steps : int = 0
         self._max_episode_length = max_episode_length
         self._last_dg : float = 0.
         self.last_reward : tp.Optional[float] = None
+        # self._task_info = {"sx":None,"sy":None,"gx":None,"gy":None} merged to _step_info
 
         # for visualization
         self.scan_intersection = None
         self.render_axis = None
-        
+        self.text = None
     
     def init_render_ax(self,ax):
         if ax is None:
-            fig, ax = plt.subplots(figsize=(5,5)) 
+            fig, ax = plt.subplots(figsize=(8,8)) 
+        
         plt.xlim(-self._map_size/2.-1,self._map_size/2.+1)
         plt.ylim(-self._map_size/2.-1,self._map_size/2.+1)
+        self.text = ax.text(0, self._map_size/2.+1.2, 'v:{}[m/s]'.format(0.), fontsize=14, color='black', ha='center', va='top')
         self.render_axis = ax
         # if self.config.env.render:
         #     plt.ion()
@@ -265,30 +290,17 @@ class CrowdWorld(dm_env.Environment):
                 reward = self._reward_goal
                 done = True
                 self._step_info.add(ReachGoal())
-        else:
-            reward += self._goal_factor * (self._last_dg-dg)
+        reward += self._goal_factor * (self._last_dg-dg)
             # occu_map = obs[:4096].reshape((64,64))
             # min_dist = self.task["discomfort_dist"]
             # if min_dist == 0.2: TODO
 
         self._last_dg = dg # type: ignore
 
-        if action[0]>self._speed_limit:
-            reward -= self._velo_factor * (action[0]-self._speed_limit)
-            self._step_info.add(ViolateSpeedLimit())
+        # if action[0]>self._speed_limit:
+        #     reward -= self._velo_factor * (action[0]-self._speed_limit)
+        #     self._step_info.add(ViolateSpeedLimit())
         return reward,done
-    # def human_tracking_reward(self,action):
-    #     #np.array([dg,vx,vy,dgtheta,dgv,self.robot.radius],dtype=np.float32)
-    #     done = False
-    #     reward = 0
-
-    #     dxy = np.array(self.robot.get_goal_position())-np.array(self.robot.get_position())
-    #     dg = np.linalg.norm(dxy)
-    #     dgtheta = self.robot.goal_theta-self.robot.theta
-    #     dgv = self.robot.goal_v-np.linalg.norm(np.array([self.robot.vx,self.robot.vy]))
-    #     reward = self._goal_factor*(np.exp(-2*dg)+np.exp(-1*dgtheta))+self._velo_factor*np.exp(-0.1*dgv)
-
-    #     return reward,done #TODO
 
     def pass_human_reward(self,action):
         reward,done = self.point_goal_navi_reward(action)
@@ -334,40 +346,39 @@ class CrowdWorld(dm_env.Environment):
         # TODO cal goal reward and collision panelty as default 
         # import auxilliary task from goal class and cal reward
         reward, done= self._reward_func_tabel[self._reward_func_id](action)
-        if done:
-            return reward, done
-        safety_penalty = 0.0
-        discomfort = False
-        closest_dist = self._discomfort_dist
-        for i, human in enumerate(self.humans): 
-            dist = norm(np.array([human.px - self.robot.px,human.py - self.robot.py]))
-            if dist < self._discomfort_dist:
-                discomfort = True
-                safety_penalty = safety_penalty + (dist - self._discomfort_dist) #value<0
-                if closest_dist>dist:
-                    closest_dist=dist
-        reward += self._discomfort_penalty_factor*safety_penalty
-        if discomfort:
-            self._step_info.add(Discomfort(closest_dist))
+        # if done:
+        #     return reward, done
+        # safety_penalty = 0.0
+        # discomfort = False
+        # closest_dist = self._discomfort_dist
+        # for i, human in enumerate(self.humans): 
+        #     dist = norm(np.array([human.px - self.robot.px,human.py - self.robot.py]))
+        #     if dist < self._discomfort_dist:
+        #         discomfort = True
+        #         safety_penalty = safety_penalty + (dist - self._discomfort_dist) #value<0
+        #         if closest_dist>dist:
+        #             closest_dist=dist
+        # reward += self._discomfort_penalty_factor*safety_penalty
+        # if discomfort:
+        #     self._step_info.add(Discomfort(closest_dist))
 
         return reward, done
     
     def randomize_map(self):
+        
+        if not self._with_static_obstacle:
+            return 
+        
         # reset map
-        self._layout= {"polygon":[],"vertices":[],"boundary":None}
-
-        map_boundary = LinearRing( ((-self._map_size/2.-1, self._map_size/2.+1), 
-                                    (self._map_size/2.+1, self._map_size/2.+1),
-                                    (self._map_size/2.+1, -self._map_size/2.-1),
-                                    (-self._map_size/2.-1,-self._map_size/2.-1)) )
-        #map_ = {"polygon":[],"vertices":[],"boundary":map_boundary}
-        self._layout["boundary"] = map_boundary
+        self._layout["polygon"] = []
+        self._layout["vertices"] = []
+        
         #gen triangle
         x = (np.random.random() - 0.5)*self._map_size
         y = (np.random.random() - 0.5)*self._map_size
         angle1 = (np.random.random() - 0.5)*np.pi/3. + 2*np.pi/3.
         angle2 = (np.random.random() - 0.5)*np.pi/3. + 2*np.pi/3.
-        radius = np.random.random() * self._map_size/6.
+        radius = np.random.random() * self._map_size/8.
         triangle = genTriangle((x,y), [angle1,angle2], radius)
         #gen rectangle
         x = (np.random.random() - 0.5)*self._map_size
@@ -388,6 +399,7 @@ class CrowdWorld(dm_env.Environment):
         hex = Polygon(hex)
 
         boundary_polygon = triangle.union(rectangle).union(hex)
+        
         if isinstance(boundary_polygon,MultiPolygon):
             for polygon in boundary_polygon.geoms:
                 self._layout["polygon"].append(polygon)
@@ -438,7 +450,7 @@ class CrowdWorld(dm_env.Environment):
                 for agent in [self.robot] + self.humans:
                     min_dist = human.radius + agent.radius + 0.2#self._discomfort_dist
                     if norm((px - agent.px, py - agent.py)) < min_dist or \
-                            norm((px - agent.gx, py - agent.gy)) < min_dist:
+                            norm((-px - agent.gx, -py - agent.gy)) < min_dist:
                         collide = True
                         break
                 if not collide or counter<0:
@@ -494,6 +506,8 @@ class CrowdWorld(dm_env.Environment):
                     break
             if not collide:
                 break
+        # if (gx-px)**2+(gy-py)**2<6**2:
+        #     raise ValueError
         self.robot.set(px,py,gx,gy, 0, 0, np.pi / 2, goal_theta=goal_theta, goal_v=goal_v)
         self.robot.kinematics = "unicycle"
         return 
@@ -501,19 +515,26 @@ class CrowdWorld(dm_env.Environment):
     def observation_spec(self):
         if self._observation_type is ObservationType.OCCU_MAP:
             return specs.Array(
-                shape=(self._occu_map_size+6,), #map + [dgx,dgy,dgtheta,dgv,vx,vy,w]_robot_frame
+                shape=(self._occu_map_size*2+5,), #map + [dgx,dgy,dgtheta,dgv,vx,vy,w]_robot_frame
                 dtype=np.float32,
                 name='observation_occupancy_map'
             )
         elif self._observation_type is ObservationType.OCCU_FLOW:
             return specs.Array(
-                shape=(self._occu_map_size*3+6,), dtype=np.float32, name='observation_occupancy_flow')
+                shape=(self._occu_map_size*4+8,), dtype=np.float32, name='observation_occupancy_flow')
+        elif self._observation_type is ObservationType.RAW_SCAN:
+            return specs.Array(
+                shape=(725,), dtype=np.float32, name='relative pose to goal')
+        else:
+            raise NotImplementedError
 
     def action_spec(self):
         return specs.BoundedArray(shape=(2,), dtype=np.float32, name='action', minimum=-1.0, maximum=1.0)
     #specs.Array(shape=(2,), dtype=np.float32, name='action')
     
+    # TODO add custom case no. input
     def reset(self):
+        self.humans = []
         self._num_episode_steps = 0
         train_seed_begin = [0, 10, 100, 1000, 10000]
         val_seed_begin = [0, 10, 100, 1000, 10000]
@@ -524,15 +545,37 @@ class CrowdWorld(dm_env.Environment):
         
         self.random_seed = base_seed[self.phase] + self.case_counter[self.phase]
         np.random.seed(self.random_seed)
-        self.randomize_map()
+        if self.case_counter[self.phase]%self._regen_map_every==0:
+            self.randomize_map()
 
-        # set robot init state, goal pos and goal speed
-        self.generate_robot()
-        
-        human_num = np.random.randint(self._human_num[0],self._human_num[1]+1)
-        self.humans = []
-        for i in range(human_num):
-            self.humans.append(self.generate_human())
+        if self.phase == 'test' and self.case_counter[self.phase] == 0:
+            self.robot.set(0,-3, 0, 3, 0,0, np.pi / 2, goal_theta=0, goal_v=0)
+            self.robot.kinematics = "unicycle"
+            human = Human(self.config, 'humans')
+            human.start_pos.append((0, 3))
+            human.set(0, 3, 0,-3, 0, 0, 0)
+            self.humans.append(human)
+        elif self.phase == 'test' and self.case_counter[self.phase] == 1:
+            self.robot.set(-3,-3, 3, 3, 0,0, np.pi / 2, goal_theta=0, goal_v=0)
+            self.robot.kinematics = "unicycle"
+            human = Human(self.config, 'humans')
+            human.start_pos.append((3, 3))
+            human.set(3, 3, -3,-3, 0, 0, 0)
+            self.humans.append(human)
+        elif self.phase == 'test' and self.case_counter[self.phase] == 2:
+            self.robot.set(-3,0, 3, 0, 0,0, np.pi / 2, goal_theta=0, goal_v=0)
+            self.robot.kinematics = "unicycle"
+            human = Human(self.config, 'humans')
+            human.start_pos.append((3, 0))
+            human.set(3, 0, -3,0, 0, 0, 0)
+            self.humans.append(human)
+        else:
+            # set robot init state, goal pos and goal speed
+            self.generate_robot()
+            
+            human_num = np.random.randint(self._human_num[0],self._human_num[1]+1)
+            for i in range(human_num):
+                self.humans.append(self.generate_human())
         
         self._num_episode_steps = 0
         self.global_time = 0
@@ -542,17 +585,24 @@ class CrowdWorld(dm_env.Environment):
             agent.time_step = self._time_step
             agent.policy.time_step = self._time_step
 
+        self._semantic_occ_map_queue = [np.zeros((int(self._local_map_size/self._grid_size),
+                                      int(self._local_map_size/self._grid_size),
+                                      2),dtype=np.float32),
+                                      np.zeros((int(self._local_map_size/self._grid_size),
+                                      int(self._local_map_size/self._grid_size),
+                                      2),dtype=np.float32)]
         self._state = self.get_obs()
         dxy = np.array(self.robot.get_goal_position())-np.array(self.robot.get_position())
-        self._last_dg = np.linalg.norm(dxy)
+        self._last_dg = norm(dxy)
         self._step_info.reset()
         self._step_info.add(Nothing())
-    
+        self._step_info.get_task_info(self.robot.px,self.robot.py,self.robot.gx,self.robot.gy)
+
         return InformedTimeStep(
             step_type=dm_env.StepType.FIRST,
             action=np.array([0,0]),
             reward=0.0,
-            discount=self._discount,
+            discount=1.0,
             observation=self._state,
             info = copy.deepcopy(self._step_info),
             # physics=np.array(physics,dtype=np.float32),
@@ -653,48 +703,63 @@ class CrowdWorld(dm_env.Environment):
             np.array([[np.cos(self.robot.theta),-np.sin(self.robot.theta)],
                       [np.sin(self.robot.theta),np.cos(self.robot.theta)]])
         )
+        for i in range(n_laser):
+            if i not in obstacle_ray_indexs:
+                continue
+            self._current_scan[i] = static_ray_length[i]
+            self.scan_intersection.append([(self.robot.px, self.robot.py), \
+                                        (static_scan[i,0],static_scan[i,1])])
+            x = scan_obstacle_layer_local[i,0]
+            y = scan_obstacle_layer_local[i,1]
+            grid_x = int((x+self._local_map_size/2.)/self._grid_size)
+            grid_y = int((y+self._local_map_size/2.)/self._grid_size)
+            if grid_x>=0 and grid_x<semantic_occu_map.shape[0] \
+            and grid_y>=0 and grid_y<semantic_occu_map.shape[1]:
+                semantic_occu_map[grid_x,grid_y,0] = 1.0
+        for i in range(n_laser):
+            if i not in human_ray_indexs:
+                continue
+            self._current_scan[i] = dynamic_ray_length[i]
+            self.scan_intersection.append([(self.robot.px, self.robot.py), \
+                                        (dynamic_scan[i,0],dynamic_scan[i,1])])
+            x = scan_human_layer_local[i,0]
+            y = scan_human_layer_local[i,1]
+            grid_x = int((x+self._local_map_size/2.)/self._grid_size)
+            grid_y = int((y+self._local_map_size/2.)/self._grid_size)
+            if grid_x>=0 and grid_x<semantic_occu_map.shape[0] \
+            and grid_y>=0 and grid_y<semantic_occu_map.shape[1]:
+                semantic_occu_map[grid_x,grid_y,1] = 1.0
+        robot_v = np.sqrt(self.robot.vx**2+self.robot.vy**2)
+        robot_w = self.robot.w
+        dxy = np.array(self.robot.get_goal_position())-np.array(self.robot.get_position())
+        dg = norm(dxy)
+        goal_direction = np.arctan2(dxy[1],dxy[0])
+        hf = self.robot.theta-goal_direction
+        # transform dxy to base frame
+        vx = (self.robot.vx * np.cos(hf) + self.robot.vy * np.sin(hf))
+        vy = (self.robot.vy * np.cos(hf) - self.robot.vx * np.sin(hf))
+
+        if self._observation_type == ObservationType.RAW_SCAN:
+            return np.hstack([self._current_scan,
+                              np.array([dg,hf,vx,vy,self.robot.radius],dtype=np.float32)]) 
         if self._observation_type == ObservationType.OCCU_MAP:
-            for i in range(n_laser):
-                if i not in obstacle_ray_indexs:
-                    continue
-                self._current_scan[i] = static_ray_length[i]
-                self.scan_intersection.append([(self.robot.px, self.robot.py), \
-                                            (static_scan[i,0],static_scan[i,1])])
-                x = scan_obstacle_layer_local[i,0]
-                y = scan_obstacle_layer_local[i,1]
-                grid_x = int((x+self._local_map_size/2.)/self._grid_size)
-                grid_y = int((y+self._local_map_size/2.)/self._grid_size)
-                if grid_x>=0 and grid_x<semantic_occu_map.shape[0] \
-                and grid_y>=0 and grid_y<semantic_occu_map.shape[1]:
-                    semantic_occu_map[grid_x,grid_y,0] = 1.0
-            for i in range(n_laser):
-                if i not in human_ray_indexs:
-                    continue
-                self._current_scan[i] = dynamic_ray_length[i]
-                self.scan_intersection.append([(self.robot.px, self.robot.py), \
-                                            (dynamic_scan[i,0],dynamic_scan[i,1])])
-                x = scan_human_layer_local[i,0]
-                y = scan_human_layer_local[i,1]
-                grid_x = int((x+self._local_map_size/2.)/self._grid_size)
-                grid_y = int((y+self._local_map_size/2.)/self._grid_size)
-                if grid_x>=0 and grid_x<semantic_occu_map.shape[0] \
-                and grid_y>=0 and grid_y<semantic_occu_map.shape[1]:
-                    semantic_occu_map[grid_x,grid_y,1] = 1.0
+            # if heading_diff_cosine>np.cos(np.pi/4): 
+            #     reward += 0.0005 TODO drl-vo reward term
 
-            dxy = np.array(self.robot.get_goal_position())-np.array(self.robot.get_position())
-            da = self.robot.theta
-            robot_v = np.sqrt(self.robot.vx**2+self.robot.vy**2)
-            robot_w = self.robot.w
-            # transform dxy to base frame
-            gx = (dxy[0] * np.cos(da) + dxy[1] * np.sin(da))
-            gy = (dxy[1] * np.cos(da) - dxy[0] * np.sin(da))
-
-            dgtheta = self.robot.goal_theta-self.robot.theta
+            # dgtheta = self.robot.goal_theta-self.robot.theta
             # dgv = self.robot.goal_v-np.linalg.norm(np.array([self.robot.vx,self.robot.vy]))
 
             return np.hstack([semantic_occu_map[...,1].flatten(),
                               semantic_occu_map[...,0].flatten(),
-                              np.array([gx,gy,dgtheta,robot_v,robot_w,self.robot.radius],dtype=np.float32)]) 
+                              np.array([dg,hf,vx,vy,self.robot.radius],dtype=np.float32)]) 
+        elif self._observation_type == ObservationType.OCCU_FLOW:
+            self._semantic_occ_map_queue.pop(0)
+            self._semantic_occ_map_queue.append(semantic_occu_map)
+            return np.hstack([self._semantic_occ_map_queue[1][...,1].flatten(),
+                              self._semantic_occ_map_queue[1][...,0].flatten(),
+                              self._semantic_occ_map_queue[0][...,1].flatten(),
+                              self._semantic_occ_map_queue[0][...,0].flatten(),
+                              np.array([self.robot.px,self.robot.py,self.robot.theta, self.robot.gx,self.robot.gy,robot_v,robot_w,self.robot.radius],dtype=np.float32)])
         else:
             # rethink of dg,vx,vy,dgtheta,dgv,self.robot.radius
             # there is no information about theta of the robot in goal coordinate
@@ -718,7 +783,7 @@ class CrowdWorld(dm_env.Environment):
         for human in self.humans:
             ob = self.compute_observation_for(human)
             human_actions.append(human.act(ob))
-        robot_action = ActionVW(action[0]*self.robot.v_pref,action[1]*self.robot.rotation_constraint)
+        robot_action = ActionVW(((action[0]+1.)/2.)*self.robot.v_pref,action[1]*self.robot.rotation_constraint)
         # update all agents
         self.robot.step(robot_action)
         for human, human_action in zip(self.humans, human_actions):
@@ -736,25 +801,24 @@ class CrowdWorld(dm_env.Environment):
         self._step_info.reset()
         # cal reward
         step_type = dm_env.StepType.MID
-        discount = self._discount
-        if (self._max_episode_length is not None and
-            self._num_episode_steps >= self._max_episode_length):
-            reward = 0
-            step_type = dm_env.StepType.LAST
-            discount = 0
-            self._step_info.add(Timeout())
-        elif collision:
+        discount = 1.0
+        if collision:
             reward = self._penalty_collision
             discount = 0
             step_type = dm_env.StepType.LAST
             self._step_info.add(Collision())
+        elif (self._max_episode_length is not None and
+            self._num_episode_steps >= self._max_episode_length):
+            reward = -self._reward_goal
+            step_type = dm_env.StepType.LAST
+            discount = 0
+            self._step_info.add(Timeout())
         else:
-            reward,done= self.cal_reward(action)
+            reward,done= self.cal_reward(robot_action)
             if done:
                 step_type = dm_env.StepType.LAST
                 discount = 0
             
-
         self.last_reward = reward
         if self._step_info.empty():
             self._step_info.add(Nothing())
@@ -815,6 +879,7 @@ class CrowdWorld(dm_env.Environment):
                 artists.append(lc)
         if return_rgb:
             fig = plt.gcf()
+            self.text.set_text('v:{}[m/s]'.format(norm([self.robot.vx,self.robot.vy])))
             # plt.axis('tight')
             # plt.subplots_adjust(0, 0, 1, 1, 0, 0)
             fig.canvas.draw()

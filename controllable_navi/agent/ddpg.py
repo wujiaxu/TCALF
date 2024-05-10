@@ -17,10 +17,10 @@ from hydra.core.config_store import ConfigStore
 import omegaconf
 
 from url_benchmark.dmc import TimeStep
-from url_benchmark.in_memory_replay_buffer import ReplayBuffer
+from controllable_navi.in_memory_replay_buffer import ReplayBuffer
 from url_benchmark import utils
 from .fb_modules import mlp
-
+import math
 # MetaDict = tp.Mapping[str, tp.Union[np.ndarray, torch.Tensor]]
 MetaDict = tp.Mapping[str, np.ndarray]
 
@@ -80,8 +80,8 @@ class CrowdEncoderOM(nn.Module): #TODO test
         super().__init__()
 
         assert len(obs_shape) == 1
-        self.r_state_dim = 6
-        self.grid_dim = int(np.sqrt(obs_shape[0]-self.r_state_dim))
+        self.r_state_dim = 5
+        self.grid_dim = int(np.sqrt((obs_shape[0]-self.r_state_dim)/2))
         if self.grid_dim == 64:
             self.h_om_dim = 32 * 25 * 25
         elif self.grid_dim == 32:
@@ -104,6 +104,8 @@ class CrowdEncoderOM(nn.Module): #TODO test
 
     def forward(self, obs) -> Any:
         om = obs[:,:-self.r_state_dim].view(obs.shape[0],2,self.grid_dim,self.grid_dim)
+        # import matplotlib.pyplot as plt
+        # om_show = #TODO chech
         r_state = obs[:,-self.r_state_dim:]
         om = om - 0.5
         h = self.convnet(om)
@@ -113,11 +115,129 @@ class CrowdEncoderOM(nn.Module): #TODO test
         h = self.output(h)
         return h
 
-class CrowdEncoderCOM(nn.Module):
+class Conv2dSamePad(torch.nn.Conv2d):
+    def calc_same_pad(self, i, k, s, d):
+        return max((math.ceil(i / s) - 1) * s + (k - 1) * d + 1 - i, 0)
+
+    def forward(self, x):
+        ih, iw = x.size()[-2:]
+        pad_h = self.calc_same_pad(
+            i=ih, k=self.kernel_size[0], s=self.stride[0], d=self.dilation[0]
+        )
+        pad_w = self.calc_same_pad(
+            i=iw, k=self.kernel_size[1], s=self.stride[1], d=self.dilation[1]
+        )
+
+        if pad_h > 0 or pad_w > 0:
+            x = F.pad(
+                x, [pad_w // 2, pad_w - pad_w // 2, pad_h // 2, pad_h - pad_h // 2]
+            )
+
+        ret = F.conv2d(
+            x,
+            self.weight,
+            self.bias,
+            self.stride,
+            self.padding,
+            self.dilation,
+            self.groups,
+        )
+        return ret
+    
+class CrowdEncoderOF(nn.Module):
     def __init__(self,obs_shape) -> None:
-        pass
+        super().__init__()
+
+        assert len(obs_shape) == 1
+        res_blocks = 0
+        depth=48
+        resized_image_size=4
+        self.repr_dim = 256
+
+        self.r_state_dim = 8
+        self.input_depth = 4
+        self.grid_dim = int(np.sqrt((obs_shape[0]-self.r_state_dim)/self.input_depth))
+        img_shape = (self.grid_dim,self.grid_dim,self.input_depth)
+        if self.grid_dim == 64:
+            self.h_om_dim = 384 * resized_image_size *resized_image_size
+        elif self.grid_dim == 32:
+            self.h_om_dim = 384 * resized_image_size * resized_image_size
+        else:
+            raise NotImplementedError
+        
+        _size = int(np.log2(min(img_shape[-3], img_shape[-2])))
+        _resize = int(np.log2(resized_image_size))
+        self.stages = _size - _resize
+
+        activation = nn.SiLU()
+        kw = dict(
+            padding='same',
+            padding_mode='reflect',
+            bias=True,
+        )
+
+        self.blocks = nn.ModuleList()
+        in_dim = img_shape[-1]
+        out_dim = depth
+        for i in range(self.stages):
+            # CNN layers
+            cnn_layers = nn.Sequential(
+                Conv2dSamePad(in_dim, out_dim, kernel_size=4, stride=2, bias=False),
+                nn.LayerNorm([out_dim, img_shape[0] // (2 ** (i + 1)), img_shape[1] // (2 ** (i + 1))]),
+                activation,
+            )
+
+            # Residual blocks
+            res_blocks_layers = nn.ModuleList()
+            for _ in range(res_blocks):
+                res_layers = nn.Sequential(
+                    nn.LayerNorm([out_dim, img_shape[0] // (2 ** (i + 1)), img_shape[1] // (2 ** (i + 1))]),
+                    activation,
+                    nn.Conv2d(out_dim, out_dim, kernel_size=3, stride=1, **kw),
+                    nn.LayerNorm([out_dim, img_shape[0] // (2 ** (i + 1)), img_shape[1] // (2 ** (i + 1))]),
+                    activation,
+                    nn.Conv2d(out_dim, out_dim, kernel_size=3, stride=1, **kw),
+                )
+                res_blocks_layers.append(res_layers)
+
+            self.blocks.append(nn.ModuleList([cnn_layers, res_blocks_layers]))
+            in_dim = out_dim
+            out_dim *= 2
+
+        self.out_layers = nn.ModuleList()
+        if res_blocks > 0:
+            self.out_layers.append(activation)
+        self.out_layers.append(nn.Flatten())
+
+        self.trunch = nn.Sequential(nn.Linear(self.h_om_dim+self.r_state_dim, self.repr_dim),
+                                   nn.LayerNorm(self.repr_dim), nn.Tanh())
+        self.output = nn.Sequential(nn.Linear(self.repr_dim, self.repr_dim),
+                    nn.ReLU(inplace=True))
+
     def forward(self,obs) -> Any:
-        raise NotImplementedError
+        om = obs[:,:-self.r_state_dim].view(obs.shape[0],self.input_depth,self.grid_dim,self.grid_dim)
+        r_state = obs[:,-self.r_state_dim:]
+        x = om - 0.5
+        for block in self.blocks:
+            # CNN layers
+            x = block[0](x)
+            
+
+            # Residual blocks
+            for res_block in block[1]:
+                skip = x
+                x = res_block(x)
+                x += skip
+
+        h = x
+        for layer in self.out_layers:
+            h = layer(h)
+
+        h = torch.cat([h, r_state], dim=-1)
+        h = self.trunch(h)
+        x_out = self.output(h)
+
+        return x_out
 
 
 class Actor(nn.Module):
@@ -223,17 +343,21 @@ class DDPGAgent:
         # models
         if cfg.obs_type == 'pixels':
             self.aug: tp.Union[utils.RandomShiftsAug, nn.Identity] = utils.RandomShiftsAug(pad=4)
-            self.encoder: tp.Union[Encoder, nn.Identity,CrowdEncoderOM] = Encoder(cfg.obs_shape).to(cfg.device)
+            self.encoder: tp.Union[Encoder, nn.Identity,CrowdEncoderOM,CrowdEncoderOF] = Encoder(cfg.obs_shape).to(cfg.device)
             self.obs_dim = self.encoder.repr_dim + meta_dim
         elif cfg.obs_type == 'om':
             self.aug = nn.Identity()
             self.encoder = CrowdEncoderOM(cfg.obs_shape).to(cfg.device)
             self.obs_dim = self.encoder.repr_dim + meta_dim
+        elif cfg.obs_type == 'of':
+            self.aug = nn.Identity()
+            self.encoder = CrowdEncoderOF(cfg.obs_shape).to(cfg.device)
+            self.obs_dim = self.encoder.repr_dim + meta_dim
         else:
             self.aug = nn.Identity()
             self.encoder = nn.Identity()
             self.obs_dim = cfg.obs_shape[0] + meta_dim
-
+        # print(self.encoder)
         self.actor = Actor(cfg.obs_type, self.obs_dim, self.action_dim,
                            cfg.feature_dim, cfg.hidden_dim).to(cfg.device)
 
@@ -249,6 +373,8 @@ class DDPGAgent:
         if cfg.obs_type == 'pixels':
             self.encoder_opt = torch.optim.Adam(self.encoder.parameters(), lr=cfg.lr)
         elif cfg.obs_type == 'om':
+            self.encoder_opt = torch.optim.Adam(self.encoder.parameters(), lr=cfg.lr)
+        elif cfg.obs_type == 'of':
             self.encoder_opt = torch.optim.Adam(self.encoder.parameters(), lr=cfg.lr)
         self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=cfg.lr)
         self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=cfg.lr)
@@ -364,7 +490,9 @@ class DDPGAgent:
 
         with torch.no_grad():
             stddev = utils.schedule(self.stddev_schedule, step)
-            dist = self.actor(next_obs, stddev)
+            dist = self.actor(next_obs, stddev) 
+            #shouldn't have noise here.... this is targe policy 
+            #<--- ok, TD3 adds noise to the target action, to make it harder for the policy to exploit Q-function errors by smoothing out Q along changes in action
             next_action = dist.sample(clip=self.stddev_clip)
             target_Q1, target_Q2 = self.critic_target(next_obs, next_action)
             target_V = torch.min(target_Q1, target_Q2)

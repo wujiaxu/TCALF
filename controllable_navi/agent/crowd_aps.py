@@ -2,7 +2,7 @@
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
-
+from pathlib import Path
 import pdb  # pylint: disable=unused-import
 import typing as tp
 import dataclasses
@@ -18,8 +18,9 @@ import omegaconf
 
 from url_benchmark.dmc import TimeStep
 from .ddpg import DDPGAgent, MetaDict, DDPGAgentConfig
-from url_benchmark.in_memory_replay_buffer import ReplayBuffer
+from controllable_navi.in_memory_replay_buffer import ReplayBuffer
 from typing import Any, Dict, Tuple
+from controllable_navi.agent.lagrange import Lagrange
 
 # TODO(HL): how to include GPI for continuous domain?
 
@@ -38,10 +39,17 @@ class CrowdAPSAgentConfig(DDPGAgentConfig):
     num_init_steps: int = 4096  # set to ${num_train_frames} to disable finetune policy parameters
     lstsq_batch_size: int = 4096
     num_inference_steps: int = 10000
-    balancing_factor: float = 1.0
+    # balancing_factor: float = 1.0
     # accept = returns >= self._config.smerl_target - self._config.smerl_margin
-    smerl_margin: float = 0.5
-    smerl_target: float = 1.5
+    # smerl_margin: float = 0.5
+    # smerl_target: float = 1.5
+    base_model_path: str = "/home/dl/wu_ws/TCALF/controllable_navi/exp_local/2024.05.04/130514_ddpg_crowdnavi_PointGoalNavi_online/models"
+    lagrangian_multiplier_init: float = 0.001
+    lagrangian_multiplier_lr: float = 0.035
+    lagrange_multiplier_upper_bound: float = 50
+    lagrange_update_interval: int = 1
+    lagrange_update_sample_num: int = 20
+    constrain_relaxation_alpha: float = 0.8
 
 
 cs = ConfigStore.instance()
@@ -151,9 +159,18 @@ class APSAgent(DDPGAgent):
         rms = utils.RMS(self.device)
         self.pbe = utils.PBE(rms, cfg.knn_clip, cfg.knn_k, cfg.knn_avg, cfg.knn_rms,
                              cfg.device)
-        self.balancing_factor = cfg.balancing_factor
-        self.smerl_target = cfg.smerl_target
-        self.smerl_margin = cfg.smerl_margin
+        # self.balancing_factor = cfg.balancing_factor
+        # self.smerl_target = cfg.smerl_target
+        # self.smerl_margin = cfg.smerl_margin
+
+        # base model
+        checkpoint = Path(cfg.base_model_path)/"latest.pt"
+        with checkpoint.open("rb") as f:
+            payload = torch.load(f, map_location=cfg.device)
+        self.base_model: DDPGAgent = payload["agent"]
+        self.lagrange = Lagrange(cfg.lagrangian_multiplier_init,cfg.lagrangian_multiplier_lr,cfg.lagrange_multiplier_upper_bound)
+        self.update_lagrange_every_steps = self.update_every_steps * cfg.lagrange_update_interval
+        self.base_model_meta = OrderedDict()
         # optimizers
         self.aps_opt = torch.optim.Adam(self.aps.parameters(), lr=self.lr)
 
@@ -226,10 +243,13 @@ class APSAgent(DDPGAgent):
 
         if step % self.update_every_steps != 0:
             return metrics
+        
+        if step % self.update_lagrange_every_steps == 0:
+            metrics.update(self.update_lagrange(replay_loader,step))
 
         batch = replay_loader.sample(self.cfg.batch_size).to(self.device)
 
-        obs, action, extr_reward, discount, next_obs, episode_return = batch.unpack_with_episode_return()
+        obs, action, extr_reward, discount, next_obs = batch.unpack()
         task = batch.meta["task"]
 
         # augment and encode
@@ -251,8 +271,9 @@ class APSAgent(DDPGAgent):
                 metrics['intr_sf_reward'] = intr_sf_reward.mean().item()
 
             # TODO cal reward according to reture @ diayn_smerl
-            accept = episode_return >= self.smerl_target - self.smerl_margin
-            reward = intr_reward*accept*self.balancing_factor + extr_reward
+            # accept = episode_return >= self.smerl_target - self.smerl_margin
+            reward = intr_reward #*accept*self.balancing_factor + extr_reward
+
         else:
             reward = extr_reward
 
@@ -322,12 +343,12 @@ class APSAgent(DDPGAgent):
 
     @torch.no_grad()
     def infer_meta_from_obs_and_rewards(self, obs: torch.Tensor, reward: torch.Tensor) -> MetaDict:
-        print('max reward: ', reward.max().cpu().item())
-        print('99 percentile: ', torch.quantile(reward, 0.99).cpu().item())
-        print('median reward: ', reward.median().cpu().item())
-        print('min reward: ', reward.min().cpu().item())
-        print('mean reward: ', reward.mean().cpu().item())
-        print('num reward: ', reward.shape[0])
+        # print('max reward: ', reward.max().cpu().item())
+        # print('99 percentile: ', torch.quantile(reward, 0.99).cpu().item())
+        # print('median reward: ', reward.median().cpu().item())
+        # print('min reward: ', reward.min().cpu().item())
+        # print('mean reward: ', reward.mean().cpu().item())
+        # print('num reward: ', reward.shape[0])
 
         obs = self.aug_and_encode(obs)
         rep = self.aps(obs)
@@ -370,6 +391,28 @@ class APSAgent(DDPGAgent):
         critic_loss.backward()
         self.critic_opt.step()
         return metrics
+    
+    def update_lagrange(self,replay_loader: ReplayBuffer, step: int)->Dict[str,Any]:
+        obs_init, episode_returns = replay_loader.sample_recent(self.cfg.lagrange_update_sample_num)
+        
+        obs_init = torch.as_tensor(obs_init, device=self.device)
+        obs_init = self.aug_and_encode(obs_init).detach()
+        stddev = utils.schedule(self.stddev_schedule, step)
+        action_base_dist = self.base_model.actor(obs_init, stddev)
+        action_base = action_base_dist.mean.detach()
+        Q_init_1, Q_init_2 = self.base_model.critic(obs_init, action_base)
+        Q_init = torch.min(Q_init_1, Q_init_2)
+        cost_limit = -Q_init.mean().cpu().item()*self.cfg.constrain_relaxation_alpha
+        cost = -np.mean(episode_returns)
+        self.lagrange.update_lagrange_multiplier(cost,cost_limit)
+        metrics: tp.Dict[str, float] = {}
+        # print(episode_returns,cost_limit)
+        if self.use_tb or self.use_wandb:
+            metrics['lagrange_multiplier'] = self.lagrange.lagrangian_multiplier
+            metrics['cost'] = cost
+            metrics['cost_limit'] = cost_limit
+
+        return metrics
 
     def update_actor(self, obs, task, step) -> Dict[str, Any]:
         """diff is critic takes task as input"""
@@ -381,6 +424,17 @@ class APSAgent(DDPGAgent):
         log_prob = dist.log_prob(action).sum(-1, keepdim=True)
         Q1, Q2 = self.critic(obs, action, task)
         Q = torch.min(Q1, Q2)
+
+        # TODO cal lagrangian 
+        base_obs = obs[...,:-self.cfg.sf_dim]
+        # action_base_dist = self.base_model.actor(base_obs, stddev)
+        # action_base = action_base_dist.mean.detach()
+        # action_base = self.base_model.act(obs[...,:-self.cfg.sf_dim],meta=self.base_model_meta,step=step,eval_mode=True)
+        Q_base_1, Q_base_2 = self.base_model.critic(base_obs, action)
+        Q_base = torch.min(Q_base_1, Q_base_2)
+        
+
+        Q = (Q+self.lagrange.lagrangian_multiplier*Q_base)/(1+self.lagrange.lagrangian_multiplier)
 
         actor_loss = -Q.mean()
 
