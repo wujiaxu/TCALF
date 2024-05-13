@@ -178,37 +178,27 @@ def _init_eval_meta(workspace: "BaseWorkspace", custom_reward: tp.Optional[_goal
         # we cannot fully type because of the FBBDPG string check :s
         num_steps = workspace.agent.cfg.num_inference_steps  # type: ignore
         obs_list, reward_list = [], []
+        next_obs_list, action_list = [],[]
         batch_size = 0
         while batch_size < num_steps:
             batch = workspace.replay_loader.sample(workspace.cfg.batch_size, custom_reward=custom_reward)
             batch = batch.to(workspace.cfg.device)
-            obs_list.append(batch.next_goal if workspace.cfg.goal_space is not None else batch.next_obs)
-            reward_list.append(batch.reward)
-            batch_size += batch.next_obs.size(0)
+            #need filter
+            obs_used = batch.obs[batch.reward!=0]
+            next_obs_used = batch.next_obs[batch.reward!=0]
+            action_used = batch.action[batch.reward!=0]
+            reward_used = batch.reward[batch.reward!=0]
+            obs_list.append(obs_used)
+            reward_list.append(reward_used)
+            action_list.append(action_used)
+            next_obs_list.append(next_obs_used)
+            batch_size += obs_used.size(0)
         obs, reward = torch.cat(obs_list, 0), torch.cat(reward_list, 0)  # type: ignore
+        next_obs, action = torch.cat(next_obs_list, 0), torch.cat(action_list, 0)  # type: ignore
         obs_t, reward_t = obs[:num_steps], reward[:num_steps]
-        return workspace.agent.infer_meta_from_obs_and_rewards(obs_t, reward_t)
-        # else:
-        #     assert isinstance(workspace.agent, agents.SFSVDAgent)
-        #     obs_list, reward_list, action_list = [], [], []
-        #     batch_size = 0
-        #     while batch_size < workspace.agent.cfg.num_inference_steps:
-        #         batch = workspace.replay_loader.sample(workspace.cfg.batch_size, custom_reward=custom_reward)
-        #         batch = batch.to(workspace.cfg.device)
-        #         obs_list.append(batch.goal if workspace.cfg.goal_space is not None else batch.obs)
-        #         action_list.append(batch.action)
-        #         reward_list.append(batch.reward)
-        #         batch_size += batch.next_obs.size(0)
-        #     obs, reward, action = torch.cat(obs_list, 0), torch.cat(reward_list, 0), torch.cat(action_list, 0)  # type: ignore
-        #     obs_t, reward_t, action_t = obs[:workspace.agent.cfg.num_inference_steps], reward[:workspace.agent.cfg.num_inference_steps],\
-        #         action[:workspace.agent.cfg.num_inference_steps]
-        #     return workspace.agent.infer_meta_from_obs_action_and_rewards(obs_t, action_t, reward_t)
+        next_obs_t, action_t = next_obs[:num_steps], action[:num_steps]
+        return workspace.agent.infer_meta_from_obs_and_rewards(obs_t, action_t,reward_t,next_obs_t)
 
-    # if workspace.cfg.goal_space is not None:
-    #     funcs = _goals.goals.funcs.get(workspace.cfg.goal_space, {})
-    #     if workspace.cfg.task in funcs:
-    #         g = funcs[workspace.cfg.task]()
-    #         return workspace.agent.get_goal_meta(g)
     return workspace.agent.infer_meta(workspace.replay_loader)
 
 
@@ -458,33 +448,28 @@ class BaseWorkspace(tp.Generic[C]):
                 if name == "global_episode":
                     logger.warning(f"Reloaded agent at global episode {self.global_episode}")
 
-    def finalize(self) -> None:
+    def finalize(self,num_eval_episodes=None,custom_task=None) -> None:
         print("Running final test", flush=True)
         repeat = 1 #self.cfg.final_tests
         if not repeat:
             return
 
-        # if self.cfg.custom_reward == "maze_multi_goal":
-        #     eval_hist = self.eval_rewards_history
-        #     rewards = {}
-        #     self.eval_rewards_history = []
-        #     self.cfg.num_eval_episodes = repeat
-        #     self.eval_maze_goals()
-        #     rewards["rewards"] = self.eval_rewards_history
-        #     self.eval_rewards_history = eval_hist  # restore
-        # else:
-        domain_tasks = {
-            # "cheetah": ['walk', 'walk_backward', 'run', 'run_backward'],
-            # "quadruped": ['stand', 'walk', 'run', 'jump'],
-            # "walker": ['stand', 'walk', 'run', 'flip'],
-            "crowdnavi":[
-                        #  'PointGoalNavi',
-                         'PassLeftSide',
-                         'PassRightSide',
-                        #  'AwayFromHuman',
-                        #  'LowSpeed'
-                         ] #'FollowWall',
-        }
+        if custom_task is None:
+            domain_tasks = {
+                "crowdnavi":[
+                            #  'PointGoalNavi',
+                            'PassLeftSide',
+                            'PassRightSide',
+                            #  'AwayFromHuman',
+                            #  'LowSpeed'
+                            ] #'FollowWall',
+            }
+        else:
+            domain_tasks = {
+                "crowdnavi":[
+                            custom_task
+                            ] 
+            }
         if self.domain not in domain_tasks:
             return
         eval_hist = self.eval_rewards_history
@@ -497,7 +482,9 @@ class BaseWorkspace(tp.Generic[C]):
             self.cfg.seed += 1  # for the sake of avoiding similar seeds
             self.eval_env = self._make_env(phase='test')
             self.eval_rewards_history = []
-            self.cfg.num_eval_episodes = 10
+            if num_eval_episodes is not None:
+                self.cfg.num_eval_episodes=num_eval_episodes
+            else:    self.cfg.num_eval_episodes = 10
             for _ in range(repeat):
                 self.eval()
             rewards[task] = self.eval_rewards_history

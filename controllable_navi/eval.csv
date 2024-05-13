@@ -1,3 +1,0 @@
-episode,episode_length,episode_reward,episode_reward#std,frame,step,success rate,z_correl
-0.0,93.5,49.594383025268435,13.022464081117098,1,1.0,0.6,0.0
-0.0,112.4,51.58231156636417,9.748060697805103,2,2.0,0.6,0.0

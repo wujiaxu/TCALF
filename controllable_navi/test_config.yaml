@@ -1,0 +1,25 @@
+defaults:
+  - _self_
+  - test_workspace_config
+  - override hydra/launcher: submitit_slurm
+
+hydra:
+  run:
+    dir: ./exp_local/test/${model_dir}/${now:%Y.%m.%d_%H%M%S}_${task}
+  sweep:
+    dir: ./exp_paper/test/${model_dir}/${now:%Y.%m.%d_%H%M%S}_${task}
+    subdir: ${hydra.job.num}
+  launcher:
+    timeout_min: 4300
+    cpus_per_task: 10
+    gpus_per_node: 1
+    tasks_per_node: 1
+    mem_gb: 400
+    nodes: 1
+    submitit_folder: ./exp_paper/test/${model_dir}/${now:%Y.%m.%d_%H%M%S}_${task}/.slurm
+    partition: learnlab # devlab learnlab
+
+
+
+# dir: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M%S}_${agent.name}_${agent.feature_learner}_${task}_${experiment}
+#     submitit_folder: ./exp_sweep/${now:%Y.%m.%d}/${now:%H%M%S}_${agent.name}_${agent.feature_learner}_${task}_${experiment}/.slurm

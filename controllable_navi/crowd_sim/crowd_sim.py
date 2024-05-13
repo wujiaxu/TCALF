@@ -147,6 +147,7 @@ def build_crowdworld_task(cfg:CrowdSimConfig, task,phase,
  
     config = EnvConfig()
 
+    # pick base reward
     tasks_specifications = {
                 # 'PointGoalExplore':{
                 #     "reward_func_ids":0,
@@ -281,6 +282,11 @@ class CrowdWorld(dm_env.Environment):
         #     plt.ion()
         #     plt.show()
 
+    #TODO
+    # def cal_auxiliary_reward(self,obs, action, obs_next, rw_type):
+    #     reward = 0
+    #     return reward
+    
     def point_goal_navi_reward(self,action):
         done = False
         reward = 0
@@ -308,7 +314,7 @@ class CrowdWorld(dm_env.Environment):
         dx = self.robot.gx - self.robot.px
         dy = self.robot.gy - self.robot.py
         dg = np.sqrt(dx*dx + dy*dy)
-        if dg <= 3:
+        if dg <= 1:
             return reward, done
         rot = self.robot.theta #np.arctan2(self.robot.vy,self.robot.vx)
         # vx = self.robot.vx*np.cos(rot) + self.robot.vy*np.sin(rot)

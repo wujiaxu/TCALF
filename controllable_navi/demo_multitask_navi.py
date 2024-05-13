@@ -23,6 +23,11 @@ import tempfile
 from pathlib import Path
 from collections import OrderedDict
 from omegaconf import OmegaConf
+import hydra
+from hydra.core.config_store import ConfigStore
+import dataclasses
+import typing as tp
+import omegaconf as omgcf
 # import streamlit as st
 try:
     import controllable_navi
@@ -48,14 +53,18 @@ logger = logging.getLogger(__name__)
 
 import matplotlib.pyplot as plt
 
-model_dir = "/home/dl/wu_ws/TCALF/controllable_navi/exp_local/2024.05.03/002925_aps_crowdnavi_PointGoalNavi_online"
+@dataclasses.dataclass
+class TestConfig():
+    model_dir:str = "2024.05.11/033634_gd_aps_crowdnavi_PointGoalNavi_online"
+    num_eval_episodes:int=10
+    task:str = 'PassLeftSide'
 
-# fig, ax = plt.subplots(figsize=(5,5)) 
+ConfigStore.instance().store(name="test_workspace_config", node=TestConfig)
 
-# @st.cache(max_entries=1, allow_output_mutation=True)
 def load_workspace(model_dir: str):
-    checkpoint = Path(model_dir)/"models/latest.pt"
-    config_file = Path(model_dir)/".hydra/config.yaml"
+    model_base=Path('/home/dl/wu_ws/TCALF/controllable_navi/exp_local/')
+    checkpoint = model_base/Path(model_dir)/"models/latest.pt"
+    config_file = model_base/Path(model_dir)/".hydra/config.yaml"
     hp = runner.HydraEntryPoint(base / "controllable_navi/pretrain.py")
     cfg = OmegaConf.load(config_file)
     cfg.use_tb=0
@@ -72,11 +81,18 @@ def load_workspace(model_dir: str):
     ws.replay_storage = replay
     return ws
 
-if __name__ == "__main__":
+@hydra.main(config_path='.', config_name='test_config', version_base="1.1")
+def main(test_cfg: omgcf.DictConfig) -> None:
+
     # load
-    ws = load_workspace(model_dir)
-    print(ws.work_dir)
-    ws.finalize()
+    ws = load_workspace(test_cfg.model_dir)
+    ws.finalize(num_eval_episodes=test_cfg.num_eval_episodes,custom_task=test_cfg.task)
+
+
+if __name__ == '__main__':
+    main()
+
+    
     # recorder = VideoRecorder(base, camera_id=ws.video_recorder.camera_id, use_wandb=False)
     # recorder.enabled = True
 

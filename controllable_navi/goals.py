@@ -59,13 +59,13 @@ class CrowdNaviReward(BaseReward):
         # np.hstack([self._current_scan,
         #                       np.array([dg,hf,vx,vy,self.robot.radius],dtype=np.float32)]) 
         if self.task["reward_func_ids"] == 0:
-            if next_obs[-5]<0.3:
-                reward = 10
-            else:
-                reward += 10 * (obs[-5]-next_obs[-5])
-                # occu_map = obs[:4096].reshape((64,64))
-                # min_dist = self.task["discomfort_dist"]
-                # if min_dist == 0.2: TODO
+            # if next_obs[-5]<0.3:
+            #     reward = 0.25
+            # else:
+            #     reward += 0.25 * (obs[-5]-next_obs[-5])
+            #     # occu_map = obs[:4096].reshape((64,64))
+            #     # min_dist = self.task["discomfort_dist"]
+            #     # if min_dist == 0.2: TODO
             if action[0]>self.task["speed_limit"]:
                 reward -= 0.2 * (action[0]-self.task["speed_limit"])
         elif self.task["reward_func_ids"] == 1:
@@ -82,15 +82,15 @@ class CrowdNaviReward(BaseReward):
             vy = robot_state[3]
             px = robot_state[0]
             py = robot_state[1]
-            if dg<0.3:
-                reward = 10
-            else:
-                reward += 10 * (obs[-5]-next_obs[-5])
-                # occu_map = obs[:4096].reshape((64,64))
-                # min_dist = self.task["discomfort_dist"]
-                # if min_dist == 0.2: TODO
-            if action[0]>self.task["speed_limit"]:
-                reward -= 10 * (action[0]-self.task["speed_limit"])
+            # if dg<0.3:
+            #     reward = 0.25
+            # else:
+            #     reward += 0.2 * (obs[-5]-next_obs[-5])
+            #     # occu_map = obs[:4096].reshape((64,64))
+            #     # min_dist = self.task["discomfort_dist"]
+            #     # if min_dist == 0.2: TODO
+            # if action[0]>self.task["speed_limit"]:
+            #     reward -= 0.2 * (action[0]-self.task["speed_limit"])
             if dg > 1:
                 rot = np.arctan2(vy,vx)
                 for i in range(human_states.shape[0]):
@@ -107,15 +107,17 @@ class CrowdNaviReward(BaseReward):
                     direction_diff = phi_other  # because ego-centric ego desirable direction psi=0
 
                     # passing 
-                    if px_other>1 and px_other<4 and abs(direction_diff)>3.*np.pi/4.:
+                    if px_other>-0.5 and px_other<4 and abs(direction_diff)>3.*np.pi/4.:
                         if self.task["forbiden_zone_y"]<0 and py_other<0 and py_other>-2: #right
-                            reward -= 2
+                            reward -= 0.05
+                            #debug
+                            # print(robot_state,human_states[i])
+                            # input("check")
                         if self.task["forbiden_zone_y"]>0 and py_other>0 and py_other<2: #left
-                            reward -= 2
+                            reward -= 0.05
         elif self.task["reward_func_ids"] == 3:
             pass
         else:
             raise NotImplementedError
-
         return reward
     

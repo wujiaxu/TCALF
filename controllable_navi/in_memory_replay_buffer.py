@@ -214,10 +214,7 @@ class ReplayBuffer:
                 reward = []
                 # TODO debug action rescale, modify collision case processing and merge it to compute reward
                 for i in range(len(step_idx)):
-                    if self._storage['reward'][ep_idx[i], step_idx[i]] == -1.:
-                        reward.append(-1.)
-                    else:
-                        reward.append(custom_reward.compute_reward(obs[i],action[i]*np.array([0.5,np.pi/2])+np.array([0.5,0.]),next_obs[i],phy[i])) #need rescale action by v_pref and w_constrain
+                    reward.append(custom_reward.compute_reward(obs[i],action[i]*np.array([0.5,np.pi/2])+np.array([0.5,0.]),next_obs[i],phy[i])) #need rescale action by v_pref and w_constrain
                 reward = np.array(reward).astype(np.float32)
             else:
                 reward = np.array([[custom_reward.from_physics(p)] for p in phy], dtype=np.float32)
