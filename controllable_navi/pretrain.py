@@ -199,7 +199,7 @@ def _init_eval_meta(workspace: "BaseWorkspace", custom_reward: tp.Optional[_goal
         next_obs_t, action_t = next_obs[:num_steps], action[:num_steps]
         return workspace.agent.infer_meta_from_obs_and_rewards(obs_t, action_t,reward_t,next_obs_t)
 
-    return workspace.agent.infer_meta(workspace.replay_loader)
+    return workspace.agent.init_meta()
 
 
 class BaseWorkspace(tp.Generic[C]):
@@ -251,6 +251,8 @@ class BaseWorkspace(tp.Generic[C]):
                              use_tb=cfg.use_tb,
                              use_wandb=cfg.use_wandb,
                              use_hiplog=cfg.use_hiplog)
+        # if cfg.use_tb:#TODO debug @ GD_aps.py
+        #     self.agent.add_to_tb(self.logger._sw)
 
         if cfg.use_wandb:
             exp_name = '_'.join([
@@ -278,7 +280,7 @@ class BaseWorkspace(tp.Generic[C]):
         
         self.replay_loader = ReplayBuffer(max_episodes=cfg.replay_buffer_episodes, 
                                             discount=cfg.discount, future=cfg.future,
-                                            max_episode_length=201)
+                                            max_episode_length=51)
         cam_id = 0 # if 'quadruped' not in self.domain else 2
 
         self.video_recorder = VideoRecorder(self.work_dir if cfg.save_video else None,
@@ -301,7 +303,7 @@ class BaseWorkspace(tp.Generic[C]):
         # cfg = self.cfg
         if self.domain == "crowdnavi":
             
-            return dmc.EnvWrapper(crowd_sims.build_crowdworld_task(self.cfg.crowd_sim,self.cfg.task.split('_')[1],phase,discount=self.cfg.discount,observation_type=self.cfg.obs_type))
+            return dmc.EnvWrapper(crowd_sims.build_crowdworld_task(self.cfg.crowd_sim,self.cfg.task.split('_')[1],phase,discount=self.cfg.discount,observation_type=self.cfg.obs_type,max_episode_length=50))
         else:
             raise NotImplementedError
         # return dmc.make(cfg.task, cfg.obs_type, cfg.frame_stack, cfg.action_repeat, cfg.seed,
@@ -325,8 +327,15 @@ class BaseWorkspace(tp.Generic[C]):
         eval_until_episode = utils.Until(self.cfg.num_eval_episodes)
         physics_agg = dmc.PhysicsAggregator()
         rewards: tp.List[float] = []
-        normalized_scores: tp.List[float] = []
-        meta = _init_eval_meta(self)  # Don't work
+        # normalized_scores: tp.List[float] = []
+        
+        seed = 12 * self.cfg.num_eval_episodes + len(rewards)
+        custom_reward = self._make_custom_reward(seed=seed)
+        if custom_reward is not None:
+            meta = _init_eval_meta(self, custom_reward)
+            print(meta)
+        else:
+            meta = _init_eval_meta(self)
         z_correl = 0.0
         # is_d4rl_task = self.cfg.task.split('_')[0] == 'd4rl'
         # TODO add info to calculate success rate slp collision rate navi time
@@ -334,13 +343,8 @@ class BaseWorkspace(tp.Generic[C]):
         while eval_until_episode(episode):
             time_step = self.eval_env.reset()
             episode_step = 0
-            # create custom reward if need be (if field exists)
-            seed = 12 * self.cfg.num_eval_episodes + len(rewards)
-            custom_reward = self._make_custom_reward(seed=seed)
-            if custom_reward is not None:
-                meta = _init_eval_meta(self, custom_reward)
-            # if self.domain == "grid":
-            #     meta = _init_eval_meta(self)
+            if custom_reward is None:
+                meta = _init_eval_meta(self)
             total_reward = 0.0
             self.video_recorder.init(self.eval_env, enabled=True) #enabled=(episode == 0) force the recorder only save episode 0
             while not time_step.last():
@@ -569,15 +573,17 @@ class Workspace(BaseWorkspace[PretrainConfig]):
                             log(key, val)
                 if self.cfg.use_hiplog and self.logger.hiplog.content:
                     self.logger.hiplog.write()
-
+                if self.cfg.use_tb:
+                    self.logger.log_distribution(self.global_frame,self.replay_loader)
+                    self.logger.log_model_weights('actor',self.global_frame,self.agent.actor)
+                    self.logger.log_model_weights('critic',self.global_frame,self.agent.critic)
+                    
                 # reset env
                 time_step = self.train_env.reset()
                 meta = self._init_meta()
                 self.replay_loader.add(time_step, meta)
                 self.train_video_recorder.init(time_step.observation)
-                # try to save snapshot
-                if self.global_frame in self.cfg.snapshot_at:
-                    self.save_checkpoint(self._checkpoint_filepath.with_name(f'snapshot_{self.global_frame}.pt'))
+                
                 episode_step = 0
                 episode_reward = 0.0
                 z_correl = 0.0
@@ -624,6 +630,10 @@ class Workspace(BaseWorkspace[PretrainConfig]):
             # save checkpoint to reload
             if not self.global_frame % self.cfg.checkpoint_every:
                 self.save_checkpoint(self._checkpoint_filepath)
+            # try to save snapshot 
+            if self.global_frame in self.cfg.snapshot_at:
+                self.save_checkpoint(self._checkpoint_filepath.with_name(f'snapshot_{self.global_frame}.pt'))
+                
         self.save_checkpoint(self._checkpoint_filepath)  # make sure we save the final checkpoint
         self.finalize()
 

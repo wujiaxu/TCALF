@@ -108,13 +108,19 @@ class CrowdNaviReward(BaseReward):
 
                     # passing 
                     if px_other>-0.5 and px_other<4 and abs(direction_diff)>3.*np.pi/4.:
-                        if self.task["forbiden_zone_y"]<0 and py_other<0 and py_other>-2: #right
-                            reward -= 0.05
+                        if self.task["forbiden_zone_y"]<0:
+                            if py_other<0 and py_other>-2: #right
+                                reward -= 0.05
+                            elif py_other>0 and py_other<2: 
+                                reward += 0.05
                             #debug
                             # print(robot_state,human_states[i])
                             # input("check")
-                        if self.task["forbiden_zone_y"]>0 and py_other>0 and py_other<2: #left
-                            reward -= 0.05
+                        if self.task["forbiden_zone_y"]>0:
+                            if py_other>0 and py_other<2: #left
+                                reward -= 0.05
+                            elif py_other<0 and py_other>-2:
+                                reward += 0.05
         elif self.task["reward_func_ids"] == 3:
             pass
         else:

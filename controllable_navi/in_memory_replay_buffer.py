@@ -11,12 +11,15 @@ import collections
 from pathlib import Path
 
 import numpy as np
+from sympy import NDimArray
 import torch
 from dm_env import specs, TimeStep
 from tqdm import tqdm
 from url_benchmark.replay_buffer import EpisodeBatch
 from url_benchmark.dmc import ExtendedGoalTimeStep
 from controllable_navi.crowd_sim.utils.info import *
+import matplotlib.pyplot as plt
+from scipy.stats import gaussian_kde
 
 Specs = tp.Sequence[specs.Array]
 logger = logging.getLogger(__name__)
@@ -249,6 +252,44 @@ class ReplayBuffer:
         return EpisodeBatch(obs=obs, goal=goal, action=action, reward=reward, discount=discount, 
                             next_obs=next_obs, next_goal=next_goal, episode_return=episode_return,
                             future_obs=future_obs, future_goal=future_goal, meta=meta, **additional)
+    
+    def plot_traj_dist(self,batch_size:int)->np.ndarray: 
+        
+        figure = plt.figure(figsize=(5,5))
+        if self._is_fixed_episode_length:
+            ep_idx = np.random.randint(0, len(self), size=batch_size)
+        else:
+            if self._episodes_selection_probability is None:
+                # long episodes are more likely to be sampled.... shit!!!! stupid setting
+                sample_prob = np.where(self._episodes_length==0,0.,1.)
+                self._episodes_selection_probability = sample_prob / sample_prob.sum()
+            ep_idx = np.random.choice(np.arange(len(self._episodes_length)), size=batch_size, p=self._episodes_selection_probability)
+
+        eps_lengths = self._episodes_length[ep_idx]
+        # add +1 for the first dummy transition
+        step_idx = np.random.randint(0, eps_lengths) + 1
+
+        phy = self._storage['physics'][ep_idx, step_idx]
+        
+        robot_x = phy[:,1]
+        robot_y = phy[:,2]
+        xy = np.vstack([robot_x, robot_y])
+        try:
+            z = gaussian_kde(xy)(xy)
+
+            # Step 4: Sort the points by density, so that the densest points are plotted on top
+            idx = z.argsort()
+            x, y, z = robot_x[idx], robot_y[idx], z[idx]
+            plt.scatter(x,y,c=z,s=30,edgecolor='none', cmap='viridis',alpha=0.5)
+        except:
+            plt.scatter(robot_x,robot_y,color='b',edgecolor='none',alpha=0.1)
+        fig = plt.gcf()
+        fig.canvas.draw()
+        data = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+        w, h = fig.canvas.get_width_height()
+        img = data.reshape((h, w, 3))
+        plt.close(figure)
+        return img
 
     def load(self, env: tp.Any, replay_dir: Path, relabel: bool = True, goal_func: tp.Any = None) -> None:
         eps_fns = sorted(replay_dir.glob('*.npz'))

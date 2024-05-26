@@ -48,7 +48,7 @@ class InformedTimeStep(ExtendedTimeStep):
     info: tp.Any
 
 class ObservationType(enum.IntEnum):
-    STATE_INDEX = enum.auto()
+    TOY_STATE = enum.auto()
     AGENT_ONEHOT = enum.auto()
     GRID = enum.auto()
     AGENT_GOAL_POS = enum.auto()
@@ -119,6 +119,8 @@ def build_crowdworld_task(cfg:CrowdSimConfig, task,phase,
         obs_type = ObservationType.OCCU_MAP
     elif observation_type =="raw_scan":
         obs_type = ObservationType.RAW_SCAN
+    elif observation_type == "toy_state":
+        obs_type = ObservationType.TOY_STATE
     else:
         raise NotImplementedError
 
@@ -531,6 +533,9 @@ class CrowdWorld(dm_env.Environment):
         elif self._observation_type is ObservationType.RAW_SCAN:
             return specs.Array(
                 shape=(725,), dtype=np.float32, name='relative pose to goal')
+        elif self._observation_type is ObservationType.TOY_STATE:
+            return specs.Array(
+                shape=(10,), dtype=np.float32, name='relative pose to goal')
         else:
             raise NotImplementedError
 
@@ -554,7 +559,14 @@ class CrowdWorld(dm_env.Environment):
         if self.case_counter[self.phase]%self._regen_map_every==0:
             self.randomize_map()
 
-        if self.phase == 'test' and self.case_counter[self.phase] == 0:
+        if self._human_num[1]==1: #TOY ENV
+            self.robot.set(0,-2, 0, 2, 0,0, np.pi / 2, goal_theta=0, goal_v=0)
+            self.robot.kinematics = "unicycle"
+            human = Human(self.config, 'humans')
+            human.start_pos.append((0, 2))
+            human.set(0, 2, 0,-2, 0, 0, 0)
+            self.humans.append(human)
+        elif self.phase == 'test' and self.case_counter[self.phase] == 0:
             self.robot.set(0,-3, 0, 3, 0,0, np.pi / 2, goal_theta=0, goal_v=0)
             self.robot.kinematics = "unicycle"
             human = Human(self.config, 'humans')
@@ -582,7 +594,6 @@ class CrowdWorld(dm_env.Environment):
             human_num = np.random.randint(self._human_num[0],self._human_num[1]+1)
             for i in range(human_num):
                 self.humans.append(self.generate_human())
-        
         self._num_episode_steps = 0
         self.global_time = 0
         self.case_counter[self.phase] = (self.case_counter[self.phase] + 1) % self.case_size[self.phase]
@@ -688,6 +699,16 @@ class CrowdWorld(dm_env.Environment):
         return scan, scan_end
     
     def get_obs(self):
+        robot_v = np.sqrt(self.robot.vx**2+self.robot.vy**2)
+        robot_w = self.robot.w
+        dxy = np.array(self.robot.get_goal_position())-np.array(self.robot.get_position())
+        dg = norm(dxy)
+        goal_direction = np.arctan2(dxy[1],dxy[0])
+        hf = self.robot.theta-goal_direction
+        # transform dxy to base frame
+        vx = (self.robot.vx * np.cos(goal_direction) + self.robot.vy * np.sin(goal_direction))
+        vy = (self.robot.vy * np.cos(goal_direction) - self.robot.vx * np.sin(goal_direction)) 
+        
         self._current_scan = np.zeros(n_laser, dtype=np.float32)
         semantic_occu_map = np.zeros((int(self._local_map_size/self._grid_size),
                                       int(self._local_map_size/self._grid_size),
@@ -735,15 +756,7 @@ class CrowdWorld(dm_env.Environment):
             if grid_x>=0 and grid_x<semantic_occu_map.shape[0] \
             and grid_y>=0 and grid_y<semantic_occu_map.shape[1]:
                 semantic_occu_map[grid_x,grid_y,1] = 1.0
-        robot_v = np.sqrt(self.robot.vx**2+self.robot.vy**2)
-        robot_w = self.robot.w
-        dxy = np.array(self.robot.get_goal_position())-np.array(self.robot.get_position())
-        dg = norm(dxy)
-        goal_direction = np.arctan2(dxy[1],dxy[0])
-        hf = self.robot.theta-goal_direction
-        # transform dxy to base frame
-        vx = (self.robot.vx * np.cos(hf) + self.robot.vy * np.sin(hf))
-        vy = (self.robot.vy * np.cos(hf) - self.robot.vx * np.sin(hf))
+        
 
         if self._observation_type == ObservationType.RAW_SCAN:
             return np.hstack([self._current_scan,
@@ -766,6 +779,17 @@ class CrowdWorld(dm_env.Environment):
                               self._semantic_occ_map_queue[0][...,1].flatten(),
                               self._semantic_occ_map_queue[0][...,0].flatten(),
                               np.array([self.robot.px,self.robot.py,self.robot.theta, self.robot.gx,self.robot.gy,robot_v,robot_w,self.robot.radius],dtype=np.float32)])
+        elif self._observation_type == ObservationType.TOY_STATE:
+            assert len(self.humans)==1
+            #[dg, vpref, vx, vy, r, θ, ˜ vx, ˜ vy, ˜ px, ˜ py, ˜ r, r +˜ r, cos(θ), sin(θ), da],
+            px = self.humans[0].px - self.robot.px
+            py = self.humans[0].py - self.robot.py
+            h_px = px * np.cos(goal_direction) + py * np.sin(goal_direction)
+            h_py = py * np.cos(goal_direction) - px * np.sin(goal_direction)
+            h_vx = self.humans[0].vx * np.cos(goal_direction) + self.humans[0].vy * np.sin(goal_direction)
+            h_vy = self.humans[0].vy * np.cos(goal_direction) - self.humans[0].vx * np.sin(goal_direction)
+            return np.hstack([np.array([h_px,h_py,h_vx,h_vy,self.humans[0].radius+self.robot.radius],dtype=np.float32),
+                              np.array([dg,hf,vx,vy,self.robot.radius],dtype=np.float32)]) 
         else:
             # rethink of dg,vx,vy,dgtheta,dgv,self.robot.radius
             # there is no information about theta of the robot in goal coordinate

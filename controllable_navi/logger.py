@@ -14,8 +14,10 @@ import torch
 import wandb
 from termcolor import colored
 from torch.utils.tensorboard import SummaryWriter
+from controllable_navi.in_memory_replay_buffer import ReplayBuffer
 from url_benchmark.hiplogs import HipLog
-
+import matplotlib.pyplot as plt
+import numpy as np
 
 Formating = tp.List[tp.Tuple[str, str, str]]
 COMMON_TRAIN_FORMAT = [('frame', 'F', 'int'), ('step', 'S', 'int'),
@@ -191,6 +193,38 @@ class Logger:
 
     def log_and_dump_ctx(self, step: int, ty: str) -> "LogAndDumpCtx":
         return LogAndDumpCtx(self, step, ty)
+    
+    def log_distribution(self, step: int, replay_buffer:ReplayBuffer)->None:
+        if self._sw is not None:
+            fig = replay_buffer.plot_traj_dist(5000)
+            self._sw.add_image("traj_dist",fig,step, dataformats='HWC')
+        return
+    
+    def log_model_weights(self, model_name:str, step: int, model: torch.nn.Module)->None:
+        for name, param in model.named_parameters():
+            if name == "trunk.0.weight":
+                weights = param.data.detach().cpu().numpy()
+                weights_mean = np.mean(weights,axis=0)
+                weights_std = np.std(weights,axis=0)
+                figure = plt.figure(figsize=(8,8))
+                # Plot mean weights
+                x = np.arange(len(weights_mean))
+                plt.plot(x, weights_mean, label='Mean Weights', color='b')
+
+                # Plot standard deviation as a shaded area
+                plt.fill_between(x, weights_mean - weights_std, weights_mean + weights_std, color='b', alpha=0.2, label='Standard Deviation')
+                
+                plt.xlabel('Neuron Index')
+                plt.ylabel('Weight Value')
+                plt.legend()
+                fig = plt.gcf()
+                fig.canvas.draw()
+                data = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+                w, h = fig.canvas.get_width_height()
+                img = data.reshape((h, w, 3))
+                plt.close(figure)
+                self._sw.add_image(f'{model_name}/{name}', img, step, dataformats='HWC')
+        return 
 
 
 class LogAndDumpCtx:

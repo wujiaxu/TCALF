@@ -55,7 +55,7 @@ import matplotlib.pyplot as plt
 
 @dataclasses.dataclass
 class TestConfig():
-    model_dir:str = "2024.05.11/033634_gd_aps_crowdnavi_PointGoalNavi_online"
+    model_dir:str = "2024.05.26/062410_gd_aps_crowdnavi_PointGoalNavi_online"
     num_eval_episodes:int=10
     task:str = 'PassLeftSide'
 

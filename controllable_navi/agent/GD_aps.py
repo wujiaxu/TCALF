@@ -21,6 +21,8 @@ from .ddpg import DDPGAgent, MetaDict, DDPGAgentConfig,Actor,Critic
 from controllable_navi.in_memory_replay_buffer import ReplayBuffer
 from typing import Any, Dict, Tuple
 from .crowd_aps import CriticSF,APS
+from controllable_navi.agent.lagrange import Lagrange
+from torch.utils.tensorboard import SummaryWriter
 
 # TODO(HL): how to include GPI for continuous domain?
 
@@ -40,6 +42,17 @@ class GD_APSAgentConfig(DDPGAgentConfig):
     lstsq_batch_size: int = 4096
     num_inference_steps: int = 10000
     balancing_factor: float = 1.0
+    use_constraint: bool = True
+    sf_reward_target: float = 0.4
+    lagrangian_k_p: float = 0.0003
+    lagrangian_k_i: float = 0.0003
+    lagrangian_k_d: float = 0.0003
+    lagrange_multiplier_upper_bound: float = 0.01
+    lagrange_update_interval: int = 1
+    use_self_supervised_encoder: bool = True
+    self_supervised_encoder:str = "IDP"
+    sse_dim: int = 128
+    use_lstm: bool = False
 
 cs = ConfigStore.instance()
 cs.store(group="agent", name="gd_aps", node=GD_APSAgentConfig)
@@ -88,19 +101,30 @@ class APSAgent(DDPGAgent):
         super().__init__(**kwargs, meta_dim=cfg.sf_dim)
         self.cfg: GD_APSAgentConfig = cfg  # override base ddpg cfg type
     
-        # inverse dynamic feature embedding
-        self.idp = IDP(self.obs_dim - self.sf_dim,self.action_dim,cfg.hidden_dim).to(kwargs['device'])
-        self.idp_opt = torch.optim.Adam(self.idp.parameters(), lr=self.lr)
+        if self.cfg.use_self_supervised_encoder:
+            self.sse_dim = self.cfg.sse_dim
+            if self.cfg.self_supervised_encoder=="IDP":
+                # inverse dynamic feature embedding
+                self.sse = IDP(self.obs_dim - self.sf_dim,self.action_dim,self.sse_dim).to(kwargs['device'])
+                self.sse_opt = torch.optim.Adam(self.sse.parameters(), lr=self.lr)
+            else:
+                raise NotImplementedError
+        else:
+            self.sse_dim = self.obs_dim - self.sf_dim
+            self.sse = nn.Identity()
+        
+        if self.cfg.use_lstm:
+            pass #TODO add lstm encoder @ IMPALA
 
-        self.actor = Actor('states', cfg.hidden_dim + self.sf_dim, self.action_dim,
+        self.actor = Actor('states', self.sse_dim + self.sf_dim, self.action_dim,
                            cfg.feature_dim, cfg.hidden_dim).to(cfg.device)
         self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=cfg.lr)
         # overwrite critic with critic sf
         # # input of critic sf is idp feature with dim=cfg.hidden_dim
-        self.critic = CriticSF('states', cfg.hidden_dim + self.sf_dim, self.action_dim,
+        self.critic = CriticSF('states', self.sse_dim + self.sf_dim, self.action_dim,
                                self.feature_dim, self.hidden_dim,
                                self.sf_dim).to(self.device)
-        self.critic_target = CriticSF('states', cfg.hidden_dim + self.sf_dim,
+        self.critic_target = CriticSF('states', self.sse_dim + self.sf_dim,
                                       self.action_dim, self.feature_dim,
                                       self.hidden_dim,
                                       self.sf_dim).to(self.device)
@@ -108,9 +132,9 @@ class APSAgent(DDPGAgent):
         self.critic_opt = torch.optim.Adam(self.critic.parameters(),
                                            lr=self.lr)
         
-        self.critic_goal = Critic('states', cfg.hidden_dim, self.action_dim,
+        self.critic_goal = Critic('states', self.sse_dim, self.action_dim,
                                self.feature_dim, self.hidden_dim).to(self.device)
-        self.critic_goal_target = Critic('states', cfg.hidden_dim,
+        self.critic_goal_target = Critic('states', self.sse_dim,
                                       self.action_dim, self.feature_dim,
                                       self.hidden_dim).to(self.device)
         self.critic_goal_target.load_state_dict(self.critic_goal.state_dict())
@@ -119,7 +143,7 @@ class APSAgent(DDPGAgent):
 
         # aps is denoted as phi in the original paper
         # input of aps is idp feature with dim=cfg.hidden_dim
-        self.aps = APS(cfg.hidden_dim*2+self.action_dim, self.sf_dim,
+        self.aps = APS(self.sse_dim*2+self.action_dim, self.sf_dim,
                        kwargs['hidden_dim']).to(kwargs['device'])
         self.aps_opt = torch.optim.Adam(self.aps.parameters(), lr=self.lr)
         
@@ -127,17 +151,45 @@ class APSAgent(DDPGAgent):
         rms = utils.RMS(self.device)
         self.pbe = utils.PBE(rms, cfg.knn_clip, cfg.knn_k, cfg.knn_avg, cfg.knn_rms,
                              cfg.device)
+        
         self.balancing_factor = cfg.balancing_factor
-
+        self.lagrange = Lagrange(cfg.balancing_factor,cfg.lagrange_multiplier_upper_bound,cfg.lagrangian_k_p,cfg.lagrangian_k_i,cfg.lagrangian_k_d)
+        self.update_lagrange_every_steps = self.update_every_steps * cfg.lagrange_update_interval
+        
         self.train()
         self.critic_target.train()
         self.aps.train()
-        self.idp.train()
+        self.critic_goal.train()
+        self.critic_goal_target.train()
+        if self.cfg.use_self_supervised_encoder:
+            self.sse.train()
 
+    #TODO debug
+    """
+    RuntimeError: Tracer cannot infer type of TruncatedNormal(loc: torch.Size([1, 2]), scale: torch.Size([1, 2]))
+    :Only tensors and (possibly nested) tuples of tensors, lists, or dictsare supported as inputs or outputs of traced functions, 
+    but instead got value of type TruncatedNormal.
+    """
+    def add_to_tb(self,writer:SummaryWriter)->None:
+        dummy_input = torch.randn(1, self.sse_dim + self.sf_dim).to(self.cfg.device)
+        writer.add_graph(self.actor,(dummy_input,dummy_input[:,:1]))
+        writer.add_graph(self.critic,(dummy_input,dummy_input[:,:2]))
+        writer.add_graph(self.critic_target,(dummy_input,dummy_input[:,:2]))
+        dummy_input = torch.randn(1, self.sse_dim).to(self.cfg.device)
+        writer.add_graph(self.critic_goal,(dummy_input,dummy_input[:,:2]))
+        writer.add_graph(self.critic_goal_target,(dummy_input,dummy_input[:,:2]))
+        dummy_input = torch.randn(1,self.sse_dim*2+self.action_dim).to(self.cfg.device)
+        writer.add_graph(self.aps,dummy_input)
+        if self.cfg.use_self_supervised_encoder:
+            dummy_input = torch.randn(1,self.obs_dim - self.sf_dim).to(self.cfg.device)
+            writer.add_graph(self.sse,dummy_input)
+        return 
+    
     def act(self, obs, meta, step, eval_mode) -> np.ndarray:
         obs = torch.as_tensor(obs, device=self.device).unsqueeze(0)
         h = self.encoder(obs)
-        h = self.idp.embed(h)
+        if self.cfg.use_self_supervised_encoder:
+            h = self.sse.embed(h)
         inputs = [h]
         for value in meta.values():
             value = torch.as_tensor(value, device=self.device).unsqueeze(0)
@@ -230,10 +282,14 @@ class APSAgent(DDPGAgent):
         obs = self.aug_and_encode(obs)
         next_obs = self.aug_and_encode(next_obs)
 
-        f_obs,f_next_obs,idp_loss = self.idp(obs, action, next_obs)
-        metrics.update(self.update_idp(idp_loss))
-        f_obs = f_obs.detach()
-        f_next_obs = f_next_obs.detach()
+        if self.cfg.use_self_supervised_encoder:
+            f_obs,f_next_obs,sse_loss = self.sse(obs, action, next_obs)
+            metrics.update(self.update_sse(sse_loss))
+            f_obs = f_obs.detach()
+            f_next_obs = f_next_obs.detach()
+        else:
+            f_obs = obs.detach()
+            f_next_obs = next_obs.detach()
 
         if self.reward_free:
             # freeze successor features at finetuning phase
@@ -307,9 +363,13 @@ class APSAgent(DDPGAgent):
         obs = self.aug_and_encode(obs)
         next_obs = self.aug_and_encode(next_obs)
 
-        f_obs,f_next_obs,idp_loss = self.idp(obs, action, next_obs)
-        f_obs = f_obs.detach()
-        f_next_obs = f_next_obs.detach()
+        if self.cfg.use_self_supervised_encoder:
+            f_obs,f_next_obs,sse_loss = self.sse(obs, action, next_obs)
+            f_obs = f_obs.detach()
+            f_next_obs = f_next_obs.detach()
+        else:
+            f_obs = obs.detach()
+            f_next_obs = next_obs.detach()
         _in = torch.cat([f_obs, action, f_next_obs], dim=1)
         rep = self.aps(_in)
         task = torch.linalg.lstsq(reward, rep)[0][:rep.size(1), :][0]
@@ -356,9 +416,13 @@ class APSAgent(DDPGAgent):
         obs = self.aug_and_encode(obs)
         next_obs = self.aug_and_encode(next_obs)
 
-        f_obs,f_next_obs,idp_loss = self.idp(obs, action, next_obs)
-        f_obs = f_obs.detach()
-        f_next_obs = f_next_obs.detach()
+        if self.cfg.use_self_supervised_encoder:
+            f_obs,f_next_obs,sse_loss = self.sse(obs, action, next_obs)
+            f_obs = f_obs.detach()
+            f_next_obs = f_next_obs.detach()
+        else:
+            f_obs = obs.detach()
+            f_next_obs = next_obs.detach()
         _in = torch.cat([f_obs, action, f_next_obs], dim=1)
 
         rep = self.aps(_in)
@@ -372,21 +436,21 @@ class APSAgent(DDPGAgent):
         # self.solved_meta = meta
         return meta
 
-    def update_idp(self,idp_loss):
+    def update_sse(self,sse_loss):
         metrics: tp.Dict[str, float] = {}
 
-        loss = idp_loss.mean()
+        loss = sse_loss.mean()
 
-        self.idp_opt.zero_grad(set_to_none=True)
+        self.sse_opt.zero_grad(set_to_none=True)
         if self.encoder_opt is not None:
             self.encoder_opt.zero_grad(set_to_none=True)
         loss.backward()
-        self.idp_opt.step()
+        self.sse_opt.step()
         if self.encoder_opt is not None:
             self.encoder_opt.step()
 
         if self.use_tb or self.use_wandb:
-            metrics['idp_loss'] = loss.item()
+            metrics['sse_loss'] = loss.item()
 
         return metrics
     
@@ -416,6 +480,17 @@ class APSAgent(DDPGAgent):
             metrics['critic_q1'] = Q1.mean().item()
             metrics['critic_q2'] = Q2.mean().item()
             metrics['critic_loss'] = critic_loss.item()
+
+        # update balancing_factor
+        if step % self.update_lagrange_every_steps ==0 and self.cfg.use_constraint:
+            cost_limit = -self.cfg.sf_reward_target
+            cost = -target_Q.mean().item() #-intr_sf_reward.mean().cpu().item()
+            self.lagrange.update_lagrange_multiplier(cost,cost_limit)
+            self.balancing_factor = self.lagrange.lagrangian_multiplier.to(self.cfg.device)
+            if self.use_tb or self.use_wandb:
+                metrics['lagrange_multiplier'] = self.lagrange.lagrangian_multiplier
+                metrics['cost'] = cost
+                metrics['cost_limit'] = cost_limit
 
         # optimize critic
         self.critic_opt.zero_grad(set_to_none=True)
@@ -470,7 +545,7 @@ class APSAgent(DDPGAgent):
         Q_goal_1, Q_goal_2 = self.critic_goal(obs, action)
         Q_goal = torch.min(Q_goal_1, Q_goal_2)
 
-        actor_loss = -self.balancing_factor*Q.mean()-Q_goal.mean()
+        actor_loss = (-self.balancing_factor*Q.mean()-Q_goal.mean())/(1+self.balancing_factor)
 
         # optimize actor
         self.actor_opt.zero_grad(set_to_none=True)

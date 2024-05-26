@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections import deque
 
+from numpy import dtype
 import torch
 
 class Lagrange:
@@ -39,29 +40,43 @@ class Lagrange:
     """
 
     # pylint: disable-next=too-many-arguments
+    # K_d= 0 or K_p = 0 covers the traditional Lagrangian method
     def __init__(
         self,
         lagrangian_multiplier_init: float,
-        lagrangian_multiplier_lr: float,
-        lagrangian_upper_bound: float | None = None,
+        lagrangian_upper_bound: float,
+        k_p: float = 0.0,
+        k_i: float = 0.0003,
+        k_d: float = 0.0,
+        pid_delta_p_ema_alpha: float = 0.95,
+        pid_delta_d_ema_alpha: float =0.95,
+        pid_d_delay: int = 10
+
     ) -> None:
         """Initialize an instance of :class:`Lagrange`."""
-        self.lagrangian_multiplier_lr: float = lagrangian_multiplier_lr
-        self.lagrangian_upper_bound: float | None = lagrangian_upper_bound
+
+        assert k_p>=0
+        assert k_i>=0
+        assert k_d>=0
+
+        self.lagrangian_upper_bound: float = lagrangian_upper_bound
+        self.pid_Kp: float = k_p
+        self.pid_Ki: float = k_i
+        self.pid_Kd: float = k_d
+        self.pid_delta_p_ema_alpha: float = pid_delta_p_ema_alpha
+        self.pid_delta_d_ema_alpha: float = pid_delta_d_ema_alpha
 
         init_value = max(lagrangian_multiplier_init, 0.0)
-        self._lagrangian_multiplier: torch.nn.Parameter = torch.nn.Parameter(
-            torch.as_tensor(init_value),
-            requires_grad=True,
-        )
-        self.lambda_range_projection: torch.nn.ReLU = torch.nn.ReLU()
-        # fetch optimizer from PyTorch optimizer package
-        self.lambda_optimizer: torch.optim.Optimizer = torch.optim.Adam(
-            [
-                self._lagrangian_multiplier,
-            ],
-            lr=lagrangian_multiplier_lr,
-        )
+        self._lagrangian_multiplier: float = init_value
+        self.pid_i: float = init_value
+        self.cost_ds = deque(maxlen=pid_d_delay)
+        self.cost_ds.append(0)
+        self._delta_p = 0
+        self._cost_d = 0
+        
+        
+        # self.I = 0
+        # self.prev_cost = 0
 
     @property
     def lagrangian_multiplier(self) -> torch.Tensor:
@@ -70,20 +85,9 @@ class Lagrange:
         Returns:
             the lagrangian multiplier
         """
-        return self.lambda_range_projection(self._lagrangian_multiplier).detach().item()
+        return torch.Tensor([max(0, self._lagrangian_multiplier)])
 
-    def compute_lambda_loss(self, mean_ep_cost: float, cost_limit: float) -> torch.Tensor:
-        """Compute the loss of the lagrangian multiplier.
-        
-        Args:
-            mean_ep_cost: the mean episode cost
-            
-        Returns:
-            the loss of the lagrangian multiplier
-        """
-        return -self._lagrangian_multiplier * (mean_ep_cost - cost_limit)
-
-    def update_lagrange_multiplier(self, Jc: float, cost_limit: float) -> None:
+    def update_lagrange_multiplier(self, ep_cost_avg: float, cost_limit: float) -> None:
         """Update the lagrangian multiplier.
         
         Args:
@@ -92,11 +96,25 @@ class Lagrange:
         Returns:
             the loss of the lagrangian multiplier
         """
-        self.lambda_optimizer.zero_grad()
-        lambda_loss = self.compute_lambda_loss(Jc,cost_limit)
-        lambda_loss.backward()
-        self.lambda_optimizer.step()
-        self._lagrangian_multiplier.data.clamp_(
-            0.0,
-            self.lagrangian_upper_bound,
-        )  # enforce: lambda in [0, inf]
+        # delta = Jc-cost_limit
+        # derivative = max(0,Jc-self.prev_cost)
+        # self.I = max(0,self.I+self.k_i*delta)
+        # self._lagrangian_multiplier =  max(0,self.k_p*delta+self.I+self.k_d*derivative)
+        # self._lagrangian_multiplier = min(self._lagrangian_multiplier,self.lagrangian_upper_bound)
+
+        delta = float(ep_cost_avg - cost_limit)  # ep_cost_avg: tensor
+        self.pid_i = max(0., self.pid_i + delta * self.pid_Ki)   
+        a_p = self.pid_delta_p_ema_alpha
+        self._delta_p *= a_p
+        self._delta_p += (1 - a_p) * delta
+        a_d = self.pid_delta_d_ema_alpha
+        self._cost_d *= a_d
+        self._cost_d += (1 - a_d) * float(ep_cost_avg)
+        pid_d = max(0., self._cost_d - self.cost_ds[0])
+        pid_o = (self.pid_Kp * self._delta_p + self.pid_i +
+            self.pid_Kd * pid_d)
+        
+        self._lagrangian_multiplier = max(0., pid_o)
+        self._lagrangian_multiplier = min(self._lagrangian_multiplier, self.lagrangian_upper_bound)
+
+        self.cost_ds.append(self._cost_d)
