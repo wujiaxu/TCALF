@@ -80,6 +80,7 @@ class FBDDPGAgentConfig:
     q_loss_coef: float = 0.01
     additional_metric: bool = False
     add_trunk: bool = False
+    use_sequence: bool = False
 
 
 cs = ConfigStore.instance()

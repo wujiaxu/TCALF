@@ -143,7 +143,7 @@ class ReplayBuffer:
                     _shape = values.shape
                     if self._max_episode_length is not None:
                         _shape = (self._max_episode_length,) + _shape[1:]
-                    self._storage[name] = np.empty((self._max_episodes,) + _shape, dtype=dtype)
+                    self._storage[name] = np.zeros((self._max_episodes,) + _shape, dtype=dtype)
                 #TODO ValueError: could not broadcast input array from shape (201,10) into shape (67,10) <- solved
                 # the bug is caused by non fixed length of episode, so need to def self._max_episode_length to max length of crowdsim +1 
                 self._storage[name][self._idx][:len(values)] = values
@@ -252,6 +252,60 @@ class ReplayBuffer:
         return EpisodeBatch(obs=obs, goal=goal, action=action, reward=reward, discount=discount, 
                             next_obs=next_obs, next_goal=next_goal, episode_return=episode_return,
                             future_obs=future_obs, future_goal=future_goal, meta=meta, **additional)
+    
+    def sample_sequence(self, batch_size, custom_reward: tp.Optional[tp.Any] = None, with_physics: bool = False) -> EpisodeBatch:
+        if not hasattr(self, "_batch_names"):
+            self._batch_names = set(field.name for field in dataclasses.fields(ExtendedGoalTimeStep))
+        if not isinstance(self._future, float):
+            assert isinstance(self._future, bool)
+            self._future = float(self._future)
+
+        if self._is_fixed_episode_length:
+            ep_idx = np.random.randint(0, len(self), size=batch_size)
+        else:
+            if self._episodes_selection_probability is None:
+                # long episodes are more likely to be sampled.... shit!!!! stupid setting
+                sample_prob = np.where(self._episodes_length==0,0.,1.)
+                self._episodes_selection_probability = sample_prob / sample_prob.sum()
+            ep_idx = np.random.choice(np.arange(len(self._episodes_length)), size=batch_size, p=self._episodes_selection_probability)
+
+        eps_lengths = self._episodes_length[ep_idx]
+        # add +1 for the first dummy transition
+        step_idx = np.random.randint(0, eps_lengths) + 1
+        assert (step_idx <= eps_lengths).all()
+        if self._future < 1:
+            # future_idx = step_idx + np.random.randint(0, self.episode_length - step_idx + 1, size=self._batch_size)
+            future_idx = step_idx + np.random.geometric(p=(1 - self._future), size=batch_size)
+            future_idx = np.clip(future_idx, 0, eps_lengths)
+            assert (future_idx <= eps_lengths).all()
+        meta = {name: data[ep_idx, step_idx - 1] for name, data in self._storage.items() if name not in self._batch_names}
+        obs = self._storage['observation'][ep_idx]
+        obs_mask = [np.hstack([np.ones(i,dtype=np.float32),np.zeros(self._max_episode_length-i,dtype=np.float32)]) for i in step_idx]
+        obs_mask = np.vstack(obs_mask)
+        action = self._storage['action'][ep_idx, step_idx]
+        next_obs = self._storage['observation'][ep_idx]
+        next_obs_mask = [np.hstack([np.ones(i+1,dtype=np.float32),np.zeros(self._max_episode_length-i-1,dtype=np.float32)]) for i in step_idx]
+        next_obs_mask = np.vstack(next_obs_mask)
+        phy = self._storage['physics'][ep_idx, step_idx]
+        if custom_reward is not None:
+            if hasattr(custom_reward,"task"):
+                reward = []
+                # TODO debug action rescale, modify collision case processing and merge it to compute reward
+                for i in range(len(step_idx)):
+                    reward.append(custom_reward.compute_reward(obs[i],action[i]*np.array([0.5,np.pi/2])+np.array([0.5,0.]),next_obs[i],phy[i])) #need rescale action by v_pref and w_constrain
+                reward = np.array(reward).astype(np.float32)
+            else:
+                reward = np.array([[custom_reward.from_physics(p)] for p in phy], dtype=np.float32)
+        else:
+            reward = self._storage['reward'][ep_idx, step_idx]
+        discount = self._discount * self._storage['discount'][ep_idx, step_idx]
+
+        additional = {}
+        if with_physics:
+            additional["_physics"] = phy
+        # TODO remove type ignore when working
+        return EpisodeBatch(obs=obs, obs_mask=obs_mask, action=action, reward=reward, discount=discount, 
+                            next_obs=next_obs, next_obs_mask=next_obs_mask, meta=meta, **additional)
     
     def plot_traj_dist(self,batch_size:int)->np.ndarray: 
         

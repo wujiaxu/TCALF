@@ -9,17 +9,21 @@ import dataclasses
 from typing import Any, Tuple
 from collections import OrderedDict
 
+from IPython import embed_kernel
 import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
 from hydra.core.config_store import ConfigStore
 import omegaconf
+from traitlets import Dict
 
 from url_benchmark.dmc import TimeStep
 from controllable_navi.in_memory_replay_buffer import ReplayBuffer
 from url_benchmark import utils
 from .fb_modules import mlp
+# TODO from controllable_navi.agent.Transformer.models.ST_Transformer import TTransformer, husformerEncoder
+from controllable_navi.agent.Transformer.models.position_embedding import SinusoidalPositionalEmbedding
 import math
 # MetaDict = tp.Mapping[str, tp.Union[np.ndarray, torch.Tensor]]
 MetaDict = tp.Mapping[str, np.ndarray]
@@ -47,13 +51,13 @@ class DDPGAgentConfig:
     nstep: int = 3
     batch_size: int = 1024  # 256 for pixels
     init_critic: bool = True
+    use_sequence: bool = False
     # update_encoder: ${update_encoder}  # not in the config
 
 
 cs = ConfigStore.instance()
 cs.store(group="agent", name="ddpg", node=DDPGAgentConfig)
-
-
+    
 class Encoder(nn.Module):
     def __init__(self, obs_shape) -> None:
         super().__init__()
@@ -75,171 +79,164 @@ class Encoder(nn.Module):
         h = h.view(h.shape[0], -1)
         return h
     
-class CrowdEncoderOM(nn.Module): #TODO test
-    def __init__(self,obs_shape) -> None:
+class StateEncoder(nn.Module):
+    def __init__(self, obs_shape) -> None:
         super().__init__()
-
         assert len(obs_shape) == 1
-        self.r_state_dim = 5
-        self.grid_dim = int(np.sqrt((obs_shape[0]-self.r_state_dim)/2))
-        if self.grid_dim == 64:
-            self.h_om_dim = 32 * 25 * 25
-        elif self.grid_dim == 32:
-            self.h_om_dim = 32 * 9 * 9
-        else:
-            raise NotImplementedError
-        self.repr_dim = 256
+        feature_dim = 32
+        self.net = nn.Sequential(nn.Linear(obs_shape[0], feature_dim),
+                                   nn.LayerNorm(feature_dim))
+    def forward(self,x):
+        return self.net(x)
 
-        self.convnet = nn.Sequential(nn.Conv2d(2, 32, 3, stride=2),
-                                     nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
-                                     nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
-                                     nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
-                                     nn.ReLU())
-        self.trunch = nn.Sequential(nn.Linear(self.h_om_dim+self.r_state_dim, self.repr_dim),
-                                   nn.LayerNorm(self.repr_dim), nn.Tanh())
-        self.output = nn.Sequential(nn.Linear(self.repr_dim, self.repr_dim),
-                    nn.ReLU(inplace=True))
+class ScanEncoder(nn.Module):
+    def __init__(self, obs_shape) -> None:
+        super().__init__()
+        assert len(obs_shape) == 1
+        feature_dim = 128
+        input_channels = 1
+        # First convolutional layer
+        self.conv1 = nn.Conv1d(in_channels=input_channels, out_channels=32, kernel_size=5, stride=2)
+        # Second convolutional layer
+        self.conv2 = nn.Conv1d(in_channels=32, out_channels=32, kernel_size=3, stride=2)
+        # Fully connected layer
+        self.fc1 = nn.Linear(in_features=self._get_conv_output_size(input_channels), out_features=256)
+        # Output layer (if needed, depends on the task)
+        self.fc2 = nn.Linear(in_features=256, out_features=feature_dim)
 
-        self.apply(utils.weight_init)
+    def _get_conv_output_size(self, input_channels):
+        # Function to compute the size of the output from the conv layers
+        # Assuming input size is (N, input_channels, L) where L is the length of the sequence
+        dummy_input = torch.zeros(1, input_channels, 100)  # Replace 100 with an appropriate sequence length
+        dummy_output = self._forward_conv_layers(dummy_input)
+        return int(torch.flatten(dummy_output, 1).size(1))
+    
+    def _forward_conv_layers(self, x):
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        return x
+    
+    def forward(self, x):
+        x = self._forward_conv_layers(x)
+        x = torch.flatten(x, 1)  # Flatten the tensor except for the batch dimension
+        x = F.relu(self.fc1(x))
+        x = self.fc2(x)
+        return x
 
-    def forward(self, obs) -> Any:
-        om = obs[:,:-self.r_state_dim].view(obs.shape[0],2,self.grid_dim,self.grid_dim)
-        # import matplotlib.pyplot as plt
-        # om_show = #TODO chech
-        r_state = obs[:,-self.r_state_dim:]
-        om = om - 0.5
-        h = self.convnet(om)
-        h = h.view(h.shape[0], -1)
-        h = torch.cat([h, r_state], dim=-1)
-        h = self.trunch(h)
-        h = self.output(h)
+class CrowdEncoder(nn.Module):
+    def __init__(self, obs_shape_dict) -> None:
+        super().__init__()
+        assert isinstance(obs_shape_dict,dict)
+        self.sub_encoders = {}
+        self.obs_shape_dict = obs_shape_dict
+        for name in obs_shape_dict.keys():
+            input_shape,input_size = obs_shape_dict[name]
+            if 'scan' in name:
+                self.sub_encoders[name]=ScanEncoder(input_shape)
+            else:
+                self.sub_encoders[name]=StateEncoder(input_shape)
+    def forward(self,x):
+        start = 0
+        hs = []
+        for name in self.obs_shape_dict.keys():
+            input_shape,input_size = self.obs_shape_dict[name]
+            in_ = x[...,start:start+input_size]
+            hs.append(self.sub_encoders[name](in_))
+            start = input_size
+        h = torch.cat(hs, dim=-1)
         return h
 
-class Conv2dSamePad(torch.nn.Conv2d):
-    def calc_same_pad(self, i, k, s, d):
-        return max((math.ceil(i / s) - 1) * s + (k - 1) * d + 1 - i, 0)
 
-    def forward(self, x):
-        ih, iw = x.size()[-2:]
-        pad_h = self.calc_same_pad(
-            i=ih, k=self.kernel_size[0], s=self.stride[0], d=self.dilation[0]
-        )
-        pad_w = self.calc_same_pad(
-            i=iw, k=self.kernel_size[1], s=self.stride[1], d=self.dilation[1]
-        )
 
-        if pad_h > 0 or pad_w > 0:
-            x = F.pad(
-                x, [pad_w // 2, pad_w - pad_w // 2, pad_h // 2, pad_h - pad_h // 2]
-            )
+class TransformerEncoderBlock(nn.Module):
+    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1):
+        super(TransformerEncoderBlock, self).__init__()
+        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
 
-        ret = F.conv2d(
-            x,
-            self.weight,
-            self.bias,
-            self.stride,
-            self.padding,
-            self.dilation,
-            self.groups,
-        )
-        return ret
+    def forward(self, src, src_mask=None, src_key_padding_mask=None):
+        src2 = self.self_attn(src, src, src, attn_mask=src_mask, key_padding_mask=src_key_padding_mask)[0]
+        if torch.sum(torch.isnan(src2)):
+            print("src2")
+            print(src,src_mask,src_key_padding_mask)
+            raise ValueError
+        src = src + self.dropout1(src2)
+        src = self.norm1(src)
+        src2 = self.linear2(self.dropout(F.gelu(self.linear1(src))))
+        src = src + self.dropout2(src2)
+        src = self.norm2(src)
+        return src
+
+class Transformer(nn.Module):
+    def __init__(self, num_layers, d_model, nhead, dim_feedforward=2048, dropout=0.1):
+        super(Transformer, self).__init__()
+        self.encoder_layers = nn.ModuleList([TransformerEncoderBlock(d_model, nhead, dim_feedforward, dropout) for _ in range(num_layers)])
+        self.d_model = d_model
+        self.nhead = nhead
+
+    def forward(self, src, src_mask=None, src_key_padding_mask=None):
+        for i, encoder in enumerate(self.encoder_layers):
+            # print(i,src)
+            src = encoder(src, src_mask, src_key_padding_mask)
+        return src
     
-class CrowdEncoderOF(nn.Module):
-    def __init__(self,obs_shape) -> None:
-        super().__init__()
-
-        assert len(obs_shape) == 1
-        res_blocks = 0
-        depth=48
-        resized_image_size=4
-        self.repr_dim = 256
-
-        self.r_state_dim = 8
-        self.input_depth = 4
-        self.grid_dim = int(np.sqrt((obs_shape[0]-self.r_state_dim)/self.input_depth))
-        img_shape = (self.grid_dim,self.grid_dim,self.input_depth)
-        if self.grid_dim == 64:
-            self.h_om_dim = 384 * resized_image_size *resized_image_size
-        elif self.grid_dim == 32:
-            self.h_om_dim = 384 * resized_image_size * resized_image_size
+class SequenceEncoder(nn.Module):
+    embed_func: tp.Union[Encoder, nn.Identity]
+    def __init__(self,obs_dim, embed_func,num_layers=2, nhead=1, dim_feedforward=2048, dropout=0.1):
+        super(SequenceEncoder, self).__init__()
+        self.embed_func = embed_func
+        if isinstance(self.embed_func,nn.Identity):
+            embed_size = obs_dim
         else:
-            raise NotImplementedError
-        
-        _size = int(np.log2(min(img_shape[-3], img_shape[-2])))
-        _resize = int(np.log2(resized_image_size))
-        self.stages = _size - _resize
+            embed_size  = self.embed_func.repr_dim  
+        d_model = embed_size
+        self.pos_encoder = SinusoidalPositionalEmbedding(embed_size)
+        self.transformer = Transformer(num_layers, d_model, nhead, dim_feedforward, dropout)
+        self.fc_out = nn.Linear(d_model, embed_size)
+        self.d_model = d_model
+        return
+    
+    def forward(self, src_in, mask):
+        # mask processing
+        src_mask = torch.bmm(mask.unsqueeze(2), mask.unsqueeze(1)) # N, L, L
+        src_key_padding_mask = mask # N, L
+        # input embedding
+        src = self.embed_func(src_in) # N, L, C
+        # print("input",src_in)
+        # print("src",src)
+        if torch.sum(torch.isnan(src)):
+            print("src")
+            # print(src_in,src)
+            raise ValueError
+        src = src + self.pos_encoder(src_in[:, :, 0])
+        if torch.sum(torch.isnan(src)):
+            print("src pos")
+            raise ValueError
+        src = src.transpose(0, 1)  # Transformer expects (sequence_length, batch_size, d_model)
+        output = self.transformer(src, src_mask, src_key_padding_mask) # N, L, C
+        output = output.transpose(0, 1) # N, L, C
+        if torch.sum(torch.isnan(output)):
+            print("transformer")
+            raise ValueError
+        mask_expanded = mask.unsqueeze(-1).expand(-1, -1, self.d_model).to(torch.bool)# N, L, C
 
-        activation = nn.SiLU()
-        kw = dict(
-            padding='same',
-            padding_mode='reflect',
-            bias=True,
-        )
+        # Set masked elements to a very large negative value
+        masked_output = output.masked_fill(~mask_expanded, float('-inf')) # N, L, C
 
-        self.blocks = nn.ModuleList()
-        in_dim = img_shape[-1]
-        out_dim = depth
-        for i in range(self.stages):
-            # CNN layers
-            cnn_layers = nn.Sequential(
-                Conv2dSamePad(in_dim, out_dim, kernel_size=4, stride=2, bias=False),
-                nn.LayerNorm([out_dim, img_shape[0] // (2 ** (i + 1)), img_shape[1] // (2 ** (i + 1))]),
-                activation,
-            )
-
-            # Residual blocks
-            res_blocks_layers = nn.ModuleList()
-            for _ in range(res_blocks):
-                res_layers = nn.Sequential(
-                    nn.LayerNorm([out_dim, img_shape[0] // (2 ** (i + 1)), img_shape[1] // (2 ** (i + 1))]),
-                    activation,
-                    nn.Conv2d(out_dim, out_dim, kernel_size=3, stride=1, **kw),
-                    nn.LayerNorm([out_dim, img_shape[0] // (2 ** (i + 1)), img_shape[1] // (2 ** (i + 1))]),
-                    activation,
-                    nn.Conv2d(out_dim, out_dim, kernel_size=3, stride=1, **kw),
-                )
-                res_blocks_layers.append(res_layers)
-
-            self.blocks.append(nn.ModuleList([cnn_layers, res_blocks_layers]))
-            in_dim = out_dim
-            out_dim *= 2
-
-        self.out_layers = nn.ModuleList()
-        if res_blocks > 0:
-            self.out_layers.append(activation)
-        self.out_layers.append(nn.Flatten())
-
-        self.trunch = nn.Sequential(nn.Linear(self.h_om_dim+self.r_state_dim, self.repr_dim),
-                                   nn.LayerNorm(self.repr_dim), nn.Tanh())
-        self.output = nn.Sequential(nn.Linear(self.repr_dim, self.repr_dim),
-                    nn.ReLU(inplace=True))
-
-    def forward(self,obs) -> Any:
-        om = obs[:,:-self.r_state_dim].view(obs.shape[0],self.input_depth,self.grid_dim,self.grid_dim)
-        r_state = obs[:,-self.r_state_dim:]
-        x = om - 0.5
-        for block in self.blocks:
-            # CNN layers
-            x = block[0](x)
-            
-
-            # Residual blocks
-            for res_block in block[1]:
-                skip = x
-                x = res_block(x)
-                x += skip
-
-        h = x
-        for layer in self.out_layers:
-            h = layer(h)
-
-        h = torch.cat([h, r_state], dim=-1)
-        h = self.trunch(h)
-        x_out = self.output(h)
-
-        return x_out
-
-
+        # Apply max pooling
+        aggregated_vector, _ = masked_output.max(dim=1)  # (batch_size, d_model)
+        output = self.fc_out(aggregated_vector)
+        if torch.sum(torch.isnan(output)):
+            print("output")
+            raise ValueError
+        return output
+    
 class Actor(nn.Module):
     def __init__(self, obs_type, obs_dim, action_dim, feature_dim, hidden_dim) -> None:
         super().__init__()
@@ -270,6 +267,10 @@ class Actor(nn.Module):
         h = self.trunk(obs)
 
         mu = self.policy(h)
+        if torch.sum(torch.isnan(mu)):
+            print("mu")
+            raise ValueError
+        
         mu = torch.tanh(mu)
         std = torch.ones_like(mu) * std
 
@@ -327,6 +328,8 @@ class Critic(nn.Module):
 
 
 class DDPGAgent:
+    encoder: tp.Union[Encoder, SequenceEncoder, nn.Identity, CrowdEncoder]
+    aug: tp.Union[utils.RandomShiftsAug, nn.Identity]
     # pylint: disable=unused-argument
     def __init__(self, meta_dim: int = 0, **kwargs: tp.Any) -> None:
         if self.__class__.__name__.startswith(("DIAYN", "APS", "RND", "Proto", "ICMAPT", "MaxEnt")):  # HACK
@@ -339,25 +342,23 @@ class DDPGAgent:
         self.action_dim = cfg.action_shape[0]
         self.solved_meta = None
         # self.update_encoder = update_encoder  # used in subclasses
-
         # models
-        if cfg.obs_type == 'pixels':
-            self.aug: tp.Union[utils.RandomShiftsAug, nn.Identity] = utils.RandomShiftsAug(pad=4)
-            self.encoder: tp.Union[Encoder, nn.Identity,CrowdEncoderOM,CrowdEncoderOF] = Encoder(cfg.obs_shape).to(cfg.device)
+        if 'pixels' in cfg.obs_type: #TODO
+            self.aug = utils.RandomShiftsAug(pad=4)
+            self.encoder = Encoder(cfg.obs_shape).to(cfg.device)
             self.obs_dim = self.encoder.repr_dim + meta_dim
-        elif cfg.obs_type == 'om':
+        elif 'toy' not in cfg.obs_type:
             self.aug = nn.Identity()
-            self.encoder = CrowdEncoderOM(cfg.obs_shape).to(cfg.device)
-            self.obs_dim = self.encoder.repr_dim + meta_dim
-        elif cfg.obs_type == 'of':
-            self.aug = nn.Identity()
-            self.encoder = CrowdEncoderOF(cfg.obs_shape).to(cfg.device)
+            self.encoder = CrowdEncoder(cfg.obs_shape)
             self.obs_dim = self.encoder.repr_dim + meta_dim
         else:
             self.aug = nn.Identity()
             self.encoder = nn.Identity()
             self.obs_dim = cfg.obs_shape[0] + meta_dim
-        # print(self.encoder)
+        # for sequence input case
+        if cfg.use_sequence:
+            self.encoder = SequenceEncoder(cfg.obs_shape[0], self.encoder).to(cfg.device)
+        
         self.actor = Actor(cfg.obs_type, self.obs_dim, self.action_dim,
                            cfg.feature_dim, cfg.hidden_dim).to(cfg.device)
 
@@ -366,7 +367,6 @@ class DDPGAgent:
         self.critic_target: nn.Module = Critic(cfg.obs_type, self.obs_dim, self.action_dim,
                                                cfg.feature_dim, cfg.hidden_dim).to(cfg.device)
         self.critic_target.load_state_dict(self.critic.state_dict())
-
         # optimizers
 
         self.encoder_opt: tp.Optional[torch.optim.Adam] = None
@@ -375,6 +375,8 @@ class DDPGAgent:
         elif cfg.obs_type == 'om':
             self.encoder_opt = torch.optim.Adam(self.encoder.parameters(), lr=cfg.lr)
         elif cfg.obs_type == 'of':
+            self.encoder_opt = torch.optim.Adam(self.encoder.parameters(), lr=cfg.lr)
+        elif cfg.use_sequence:
             self.encoder_opt = torch.optim.Adam(self.encoder.parameters(), lr=cfg.lr)
         self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=cfg.lr)
         self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=cfg.lr)

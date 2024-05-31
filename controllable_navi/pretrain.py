@@ -65,6 +65,7 @@ torch.backends.cudnn.benchmark = True
 class Config:
     agent: tp.Any
     crowd_sim: tp.Any 
+    max_episode_length:int = 50
     # misc
     seed: int = 11
     device: str = "cuda"
@@ -125,9 +126,9 @@ ConfigStore.instance().store(name="workspace_config", node=PretrainConfig)
 
 def make_agent(
     obs_type: str, obs_spec, action_spec, num_expl_steps: int, cfg: omgcf.DictConfig
-) -> tp.Union[agents.FBDDPGAgent, agents.DDPGAgent]:
+) -> tp.Union[agents.DDPGAgent,agents.FBDDPGAgent]:
     cfg.obs_type = obs_type
-    cfg.obs_shape = obs_spec.shape
+    cfg.obs_shape = obs_spec.shape_dict
     cfg.action_shape = (action_spec.num_values, ) if isinstance(action_spec, specs.DiscreteArray) \
         else action_spec.shape
     cfg.num_expl_steps = num_expl_steps
@@ -231,21 +232,12 @@ class BaseWorkspace(tp.Generic[C]):
 
         self.train_env = self._make_env()
         self.eval_env = self._make_env(phase='val')
-        # TODO debug RuntimeError: mat1 and mat2 shapes cannot be multiplied (1024x4113 and 4114x1024) aps.critic
-        # print(self.train_env.observation_spec(),self.train_env.action_spec())
-        # crowd navi
-        #Array(shape=(4102,), dtype=dtype('float32'), name='observation_occupancy_map') 
-        # Array(shape=(2,), dtype=dtype('float32'), name='action')
-        # walker
-        # Array(shape=(24,), dtype=dtype('float32'), name='observation') 
-        # BoundedArray(shape=(6,), dtype=dtype('float32'), name='action', minimum=-1.0, maximum=1.0)
         # create agent
         self.agent = make_agent(cfg.obs_type,
                                 self.train_env.observation_spec(),
                                 self.train_env.action_spec(),
                                 cfg.num_seed_frames // cfg.action_repeat,
                                 cfg.agent)
-
         # create logger
         self.logger = Logger(self.work_dir,
                              use_tb=cfg.use_tb,
@@ -280,7 +272,7 @@ class BaseWorkspace(tp.Generic[C]):
         
         self.replay_loader = ReplayBuffer(max_episodes=cfg.replay_buffer_episodes, 
                                             discount=cfg.discount, future=cfg.future,
-                                            max_episode_length=51)
+                                            max_episode_length=self.cfg.max_episode_length+1)
         cam_id = 0 # if 'quadruped' not in self.domain else 2
 
         self.video_recorder = VideoRecorder(self.work_dir if cfg.save_video else None,
@@ -303,7 +295,7 @@ class BaseWorkspace(tp.Generic[C]):
         # cfg = self.cfg
         if self.domain == "crowdnavi":
             
-            return dmc.EnvWrapper(crowd_sims.build_crowdworld_task(self.cfg.crowd_sim,self.cfg.task.split('_')[1],phase,discount=self.cfg.discount,observation_type=self.cfg.obs_type,max_episode_length=50))
+            return dmc.EnvWrapper(crowd_sims.build_crowdworld_task(self.cfg.crowd_sim,self.cfg.task.split('_')[1],phase,discount=self.cfg.discount,observation_type=self.cfg.obs_type,max_episode_length=self.cfg.max_episode_length))
         else:
             raise NotImplementedError
         # return dmc.make(cfg.task, cfg.obs_type, cfg.frame_stack, cfg.action_repeat, cfg.seed,
@@ -325,9 +317,7 @@ class BaseWorkspace(tp.Generic[C]):
         step, episode = 0, 0
         success_num = 0
         eval_until_episode = utils.Until(self.cfg.num_eval_episodes)
-        physics_agg = dmc.PhysicsAggregator()
         rewards: tp.List[float] = []
-        # normalized_scores: tp.List[float] = []
         
         seed = 12 * self.cfg.num_eval_episodes + len(rewards)
         custom_reward = self._make_custom_reward(seed=seed)
@@ -343,30 +333,41 @@ class BaseWorkspace(tp.Generic[C]):
         while eval_until_episode(episode):
             time_step = self.eval_env.reset()
             episode_step = 0
+            if self.agent.use_sequence:
+                obs_ = np.zeros((self.cfg.max_episode_length+1,) + self.train_env.observation_spec().shape, dtype=np.float32)
+                obs_[episode_step] = time_step.observation
+                mask = np.zeros(self.cfg.max_episode_length+1, dtype=np.float32)
+                mask[episode_step] = 1
+                obs = (obs_,mask)
+            else:
+                obs = time_step.observation
             if custom_reward is None:
                 meta = _init_eval_meta(self)
             total_reward = 0.0
             self.video_recorder.init(self.eval_env, enabled=True) #enabled=(episode == 0) force the recorder only save episode 0
             while not time_step.last():
                 with torch.no_grad(), utils.eval_mode(self.agent):
-                    action = self.agent.act(time_step.observation,
+                    action = self.agent.act(obs,
                                             meta,
                                             self.global_step,
                                             eval_mode=True)
+                    # print(episode_step,action)
+                    # input()
                 time_step = self.eval_env.step(action)
-                physics_agg.add(self.eval_env)
                 self.video_recorder.record(self.eval_env)
                 # for legacy reasons, we need to check the name :s
-                if isinstance(self.agent, agents.FBDDPGAgent):
-                    if self.agent.cfg.additional_metric:
-                        z_correl += self.agent.compute_z_correl(time_step, meta)
-                        actor_success.extend(self.agent.actor_success)
                 if custom_reward is not None:
                     time_step.reward = custom_reward.from_env(self.eval_env)
                 # total_reward += time_step.reward
                 total_reward+= self.cfg.discount**episode_step*time_step.reward
                 step += 1
                 episode_step+=1
+                if self.agent.use_sequence:
+                    obs_[episode_step] = time_step.observation
+                    mask[episode_step] = 1
+                    obs = (obs_,mask)
+                else:
+                    obs = time_step.observation
             # if is_d4rl_task:
             #     normalized_scores.append(self.eval_env.get_normalized_score(total_reward))
             success_num = success_num+1 if time_step.info.contain(ReachGoal()) else success_num #this seemly no working!! TODO debug
@@ -388,10 +389,6 @@ class BaseWorkspace(tp.Generic[C]):
             log('success rate', float(success_num)/self.cfg.num_eval_episodes)
             if actor_success:
                 log('actor_sucess', float(np.mean(actor_success)))
-            if isinstance(self.agent, agents.FBDDPGAgent):
-                log('z_norm', np.linalg.norm(meta['z']).item())
-            for key, val in physics_agg.dump():
-                log(key, val)
 
     _CHECKPOINTED_KEYS = ('agent', 'global_step', 'global_episode', "replay_loader")
 
@@ -533,6 +530,14 @@ class Workspace(BaseWorkspace[PretrainConfig]):
 
         episode_step, episode_reward, z_correl = 0, 0.0, 0.0
         time_step = self.train_env.reset()
+        if self.agent.use_sequence:
+            obs_ = np.zeros((self.cfg.max_episode_length+1,) + self.train_env.observation_spec().shape, dtype=np.float32)
+            obs_[episode_step] = time_step.observation
+            mask = np.zeros(self.cfg.max_episode_length+1, dtype=np.float32)
+            mask[episode_step] = 1
+            obs = (obs_,mask)
+        else:
+            obs = time_step.observation
         meta = self._init_meta()
         self.replay_loader.add(time_step, meta)
         self.train_video_recorder.init(time_step.observation)
@@ -588,6 +593,15 @@ class Workspace(BaseWorkspace[PretrainConfig]):
                 episode_reward = 0.0
                 z_correl = 0.0
 
+                if self.agent.use_sequence:
+                    obs_ = np.zeros((self.cfg.max_episode_length+1,) + self.train_env.observation_spec().shape, dtype=np.float32)
+                    obs_[episode_step] = time_step.observation
+                    mask = np.zeros(self.cfg.max_episode_length+1, dtype=np.float32)
+                    mask[episode_step] = 1
+                    obs = (obs_,mask)
+                else:
+                    obs = time_step.observation
+
             # try to evaluate
             if eval_every_step(self.global_step):
                 self.logger.log('eval_total_time', self.timer.total_time(),
@@ -602,7 +616,7 @@ class Workspace(BaseWorkspace[PretrainConfig]):
             # meta = self.agent.update_meta(meta, self.global_step, time_step, finetune=False, replay_loader=self.replay_loader)
             # sample action
             with torch.no_grad(), utils.eval_mode(self.agent):
-                action = self.agent.act(time_step.observation,
+                action = self.agent.act(obs,
                                         meta,
                                         self.global_step,
                                         eval_mode=False)
@@ -627,6 +641,12 @@ class Workspace(BaseWorkspace[PretrainConfig]):
                 z_correl += self.agent.compute_z_correl(time_step, meta)
             episode_step += 1
             self.global_step += 1
+            if self.agent.use_sequence:
+                obs_[episode_step] = time_step.observation
+                mask[episode_step] = 1
+                obs = (obs_,mask)
+            else:
+                obs = time_step.observation
             # save checkpoint to reload
             if not self.global_frame % self.cfg.checkpoint_every:
                 self.save_checkpoint(self._checkpoint_filepath)

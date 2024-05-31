@@ -52,7 +52,6 @@ class GD_APSAgentConfig(DDPGAgentConfig):
     use_self_supervised_encoder: bool = True
     self_supervised_encoder:str = "IDP"
     sse_dim: int = 128
-    use_lstm: bool = False
 
 cs = ConfigStore.instance()
 cs.store(group="agent", name="gd_aps", node=GD_APSAgentConfig)
@@ -100,7 +99,7 @@ class APSAgent(DDPGAgent):
         # increase obs shape to include task dim (through meta_dim)
         super().__init__(**kwargs, meta_dim=cfg.sf_dim)
         self.cfg: GD_APSAgentConfig = cfg  # override base ddpg cfg type
-    
+        
         if self.cfg.use_self_supervised_encoder:
             self.sse_dim = self.cfg.sse_dim
             if self.cfg.self_supervised_encoder=="IDP":
@@ -112,9 +111,6 @@ class APSAgent(DDPGAgent):
         else:
             self.sse_dim = self.obs_dim - self.sf_dim
             self.sse = nn.Identity()
-        
-        if self.cfg.use_lstm:
-            pass #TODO add lstm encoder @ IMPALA
 
         self.actor = Actor('states', self.sse_dim + self.sf_dim, self.action_dim,
                            cfg.feature_dim, cfg.hidden_dim).to(cfg.device)
@@ -186,10 +182,16 @@ class APSAgent(DDPGAgent):
         return 
     
     def act(self, obs, meta, step, eval_mode) -> np.ndarray:
-        obs = torch.as_tensor(obs, device=self.device).unsqueeze(0)
-        h = self.encoder(obs)
-        if self.cfg.use_self_supervised_encoder:
-            h = self.sse.embed(h)
+        if self.cfg.use_sequence:
+            seq,mask = obs
+            seq = torch.as_tensor(seq, device=self.device).unsqueeze(0)
+            mask = torch.as_tensor(mask, device=self.device).unsqueeze(0)
+            h = self.encoder(seq,mask)
+        else:
+            obs = torch.as_tensor(obs, device=self.device).unsqueeze(0)
+            h = self.encoder(obs)
+        # if self.cfg.use_self_supervised_encoder:
+        #     h = self.sse.embed(h) #<--used only for state entropy estimation
         inputs = [h]
         for value in meta.values():
             value = torch.as_tensor(value, device=self.device).unsqueeze(0)
@@ -235,12 +237,12 @@ class APSAgent(DDPGAgent):
         loss = self.compute_aps_loss(obs, action, next_obs, task)
 
         self.aps_opt.zero_grad(set_to_none=True)
-        # if self.encoder_opt is not None:
-        #     self.encoder_opt.zero_grad(set_to_none=True)
+        if self.encoder_opt is not None:
+            self.encoder_opt.zero_grad(set_to_none=True)
         loss.backward()
         self.aps_opt.step()
-        # if self.encoder_opt is not None:
-        #     self.encoder_opt.step()
+        if self.encoder_opt is not None:
+            self.encoder_opt.step()
 
         if self.use_tb or self.use_wandb:
             metrics['aps_loss'] = loss.item()
@@ -252,7 +254,13 @@ class APSAgent(DDPGAgent):
         with torch.no_grad():
             _in = torch.cat([obs, action, next_obs], dim=1)
             rep = self.aps(_in, norm=False)
-        reward = self.pbe(next_obs)
+        
+        # Encoding
+        if self.cfg.use_self_supervised_encoder:
+            f_next_obs = self.sse.embed(next_obs)
+        else:
+            f_next_obs = next_obs #~5.28 next_obs, but original paper used rep
+        reward = self.pbe(f_next_obs) #not encoded? hahahaha
         intr_ent_reward = reward.reshape(-1, 1)
 
         # successor feature reward
@@ -273,41 +281,42 @@ class APSAgent(DDPGAgent):
         if step % self.update_every_steps != 0:
             return metrics
 
-        batch = replay_loader.sample(self.cfg.batch_size).to(self.device)
+        if self.cfg.use_sequence:
+            batch = replay_loader.sample_sequence(self.cfg.batch_size).to(self.device)
+            obs, obs_mask, action, extr_reward, discount, next_obs, next_obs_mask = batch.unpack_with_mask()
+            # augment and encode
+            obs = self.aug(obs)
+            obs = self.encoder(obs,obs_mask)
+            next_obs = self.aug(next_obs)
+            next_obs = self.encoder(next_obs,next_obs_mask)
+        else:
+            batch = replay_loader.sample(self.cfg.batch_size).to(self.device)
 
-        obs, action, extr_reward, discount, next_obs = batch.unpack()
+            obs, action, extr_reward, discount, next_obs = batch.unpack()
+
+            # augment and encode
+            obs = self.aug_and_encode(obs)
+            next_obs = self.aug_and_encode(next_obs)
         task = batch.meta["task"]
 
-        # augment and encode
-        obs = self.aug_and_encode(obs)
-        next_obs = self.aug_and_encode(next_obs)
-
         if self.cfg.use_self_supervised_encoder:
-            f_obs,f_next_obs,sse_loss = self.sse(obs, action, next_obs)
-            metrics.update(self.update_sse(sse_loss))
-            f_obs = f_obs.detach()
-            f_next_obs = f_next_obs.detach()
-        else:
-            f_obs = obs.detach()
-            f_next_obs = next_obs.detach()
+            metrics.update(self.update_sse(obs.detach(),action,next_obs.detach()))
 
         if self.reward_free:
             # freeze successor features at finetuning phase
-            metrics.update(self.update_aps(task, f_obs,action,f_next_obs, step))
+            metrics.update(self.update_aps(task, obs,action,next_obs, step))
 
             with torch.no_grad():
                 intr_ent_reward, intr_sf_reward = self.compute_intr_reward(
-                    task, f_obs, action, f_next_obs, step)
+                    task, obs, action, next_obs, step)
                 intr_reward = intr_ent_reward + intr_sf_reward
 
             if self.use_tb or self.use_wandb:
                 metrics['intr_reward'] = intr_reward.mean().item()
                 metrics['intr_ent_reward'] = intr_ent_reward.mean().item()
                 metrics['intr_sf_reward'] = intr_sf_reward.mean().item()
-
-            # TODO cal reward according to reture @ diayn_smerl
-            # accept = episode_return >= self.smerl_target - self.smerl_margin
-            reward = intr_reward #*self.balancing_factor + extr_reward
+            
+            reward = intr_reward
 
         else:
             reward = extr_reward
@@ -316,13 +325,13 @@ class APSAgent(DDPGAgent):
             metrics['extr_reward'] = extr_reward.mean().item()
             metrics['batch_reward'] = reward.mean().item()
 
-        # TODO
         # if not self.update_encoder:
-        #     obs = obs.detach()
-        #     next_obs = next_obs.detach()
+        obs = obs.detach()
+        next_obs = next_obs.detach()
+
         metrics.update(
-            self.update_critic_goal(f_obs, action, extr_reward, discount,
-                               f_next_obs, task, step))
+            self.update_critic_goal(obs, action, extr_reward, discount,
+                               next_obs, task, step))
 
         # extend observations with task
         # f_obs = torch.cat([f_obs, task], dim=1)
@@ -330,11 +339,11 @@ class APSAgent(DDPGAgent):
 
         # update critic
         metrics.update(
-            self.update_critic(f_obs, action, intr_reward, discount,
-                               f_next_obs, task, step))
+            self.update_critic(obs, action, intr_reward, discount,
+                               next_obs, task, step))
 
         # update actor
-        metrics.update(self.update_actor(f_obs, task, step))
+        metrics.update(self.update_actor(obs, task, step))
 
         # update critic target
         utils.soft_update_params(self.critic, self.critic_target,
@@ -363,14 +372,7 @@ class APSAgent(DDPGAgent):
         obs = self.aug_and_encode(obs)
         next_obs = self.aug_and_encode(next_obs)
 
-        if self.cfg.use_self_supervised_encoder:
-            f_obs,f_next_obs,sse_loss = self.sse(obs, action, next_obs)
-            f_obs = f_obs.detach()
-            f_next_obs = f_next_obs.detach()
-        else:
-            f_obs = obs.detach()
-            f_next_obs = next_obs.detach()
-        _in = torch.cat([f_obs, action, f_next_obs], dim=1)
+        _in = torch.cat([obs, action, next_obs], dim=1)
         rep = self.aps(_in)
         task = torch.linalg.lstsq(reward, rep)[0][:rep.size(1), :][0]
         task = task / torch.norm(task)
@@ -405,7 +407,9 @@ class APSAgent(DDPGAgent):
     def infer_meta_from_obs_and_rewards(self, obs: torch.Tensor, 
                                         action: torch.Tensor, 
                                         reward: torch.Tensor,
-                                        next_obs: torch.Tensor,) -> MetaDict:
+                                        next_obs: torch.Tensor,
+                                        obs_mask: tp.Optional[torch.Tensor]=None,
+                                        next_obs_mask: tp.Optional[torch.Tensor]=None) -> MetaDict:
         print('max reward: ', reward.max().cpu().item())
         print('99 percentile: ', torch.quantile(reward, 0.99).cpu().item())
         print('median reward: ', reward.median().cpu().item())
@@ -413,17 +417,17 @@ class APSAgent(DDPGAgent):
         print('mean reward: ', reward.mean().cpu().item())
         print('num reward: ', reward.shape[0])
 
-        obs = self.aug_and_encode(obs)
-        next_obs = self.aug_and_encode(next_obs)
-
-        if self.cfg.use_self_supervised_encoder:
-            f_obs,f_next_obs,sse_loss = self.sse(obs, action, next_obs)
-            f_obs = f_obs.detach()
-            f_next_obs = f_next_obs.detach()
+        if obs_mask and next_obs_mask:
+            # augment and encode
+            obs = self.aug(obs)
+            obs = self.encoder(obs,obs_mask)
+            next_obs = self.aug(next_obs)
+            next_obs = self.encoder(next_obs,next_obs_mask)
         else:
-            f_obs = obs.detach()
-            f_next_obs = next_obs.detach()
-        _in = torch.cat([f_obs, action, f_next_obs], dim=1)
+            obs = self.aug_and_encode(obs)
+            next_obs = self.aug_and_encode(next_obs)
+
+        _in = torch.cat([obs, action, next_obs], dim=1)
 
         rep = self.aps(_in)
         # task = torch.linalg.lstsq(reward, rep)[0][:rep.size(1), :][0]
@@ -436,18 +440,15 @@ class APSAgent(DDPGAgent):
         # self.solved_meta = meta
         return meta
 
-    def update_sse(self,sse_loss):
+    def update_sse(self,obs,action,next_obs):
         metrics: tp.Dict[str, float] = {}
 
+        _,_,sse_loss = self.sse(obs,action,next_obs)
         loss = sse_loss.mean()
 
         self.sse_opt.zero_grad(set_to_none=True)
-        if self.encoder_opt is not None:
-            self.encoder_opt.zero_grad(set_to_none=True)
         loss.backward()
         self.sse_opt.step()
-        if self.encoder_opt is not None:
-            self.encoder_opt.step()
 
         if self.use_tb or self.use_wandb:
             metrics['sse_loss'] = loss.item()

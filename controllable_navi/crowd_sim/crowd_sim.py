@@ -49,6 +49,7 @@ class InformedTimeStep(ExtendedTimeStep):
 
 class ObservationType(enum.IntEnum):
     TOY_STATE = enum.auto()
+    TIME_AWARE_TOY_STATE = enum.auto()
     AGENT_ONEHOT = enum.auto()
     GRID = enum.auto()
     AGENT_GOAL_POS = enum.auto()
@@ -56,7 +57,57 @@ class ObservationType(enum.IntEnum):
     OCCU_FLOW = enum.auto()
     OCCU_MAP = enum.auto()
     RAW_SCAN = enum.auto()
+    TIME_AWARE_RAW_SCAN = enum.auto()
     SEMANTIC_SCAN = enum.auto()
+
+class NaviObsSpace:
+
+  def __init__(self, shapes:dict, dtype, name: str):
+    """Initializes a new `Array` spec.
+
+    Args:
+      shape: An iterable specifying the array shape.
+      dtype: numpy dtype or string specifying the array dtype.
+      name: Optional string containing a semantic name for the corresponding
+        array. Defaults to `None`.
+
+    Raises:
+      TypeError: If `shape` is not an iterable of elements convertible to int,
+      or if `dtype` is not convertible to a numpy dtype.
+    """
+    self._shape_total = 0
+    self._shapes = {}
+    for compo_name in shapes.keys():
+        dim = 1
+        shape = shapes[compo_name]
+        for d in shape:
+            dim*=d
+        self._shape_total+=dim
+        self._shapes[compo_name] = (shape,dim)
+    self._dtype = np.dtype(dtype)
+    self._name = name
+
+  def get_shape(self,name):
+      return self._shapes[name]
+
+  @property
+  def shape_dict(self):
+    """Returns a `tuple` specifying the array shape."""
+    return self._shapes
+  @property
+  def shape(self):
+    """Returns a `tuple` specifying the array shape."""
+    return self._shape_total
+
+  @property
+  def dtype(self):
+    """Returns a numpy dtype specifying the array dtype."""
+    return self._dtype
+
+  @property
+  def name(self):
+    """Returns the name of the Array."""
+    return self._name
 
 class CrowdPhysics:
 
@@ -121,6 +172,10 @@ def build_crowdworld_task(cfg:CrowdSimConfig, task,phase,
         obs_type = ObservationType.RAW_SCAN
     elif observation_type == "toy_state":
         obs_type = ObservationType.TOY_STATE
+    elif observation_type =="time_aware_raw_scan":
+        obs_type = ObservationType.TIME_AWARE_RAW_SCAN
+    elif observation_type == "time_aware_toy_state":
+        obs_type = ObservationType.TIME_AWARE_TOY_STATE
     else:
         raise NotImplementedError
 
@@ -198,7 +253,7 @@ class CrowdWorld(dm_env.Environment):
                  config,
                observation_type=ObservationType.OCCU_FLOW,
                discount=1.0,
-               max_episode_length=None,
+               max_episode_length=50,
                forbiden_zone_y = 0.6,
                discomfort_dist = 0.2,
                to_wall_dist = 0.2,
@@ -262,7 +317,7 @@ class CrowdWorld(dm_env.Environment):
         # self._goal_state = None
         self.global_time : float = 0
         self._num_episode_steps : int = 0
-        self._max_episode_length = max_episode_length
+        self._max_episode_length: int = max_episode_length
         self._last_dg : float = 0.
         self.last_reward : tp.Optional[float] = None
         # self._task_info = {"sx":None,"sy":None,"gx":None,"gy":None} merged to _step_info
@@ -283,11 +338,6 @@ class CrowdWorld(dm_env.Environment):
         # if self.config.env.render:
         #     plt.ion()
         #     plt.show()
-
-    #TODO
-    # def cal_auxiliary_reward(self,obs, action, obs_next, rw_type):
-    #     reward = 0
-    #     return reward
     
     def point_goal_navi_reward(self,action):
         done = False
@@ -521,21 +571,23 @@ class CrowdWorld(dm_env.Environment):
         return 
     
     def observation_spec(self):
-        if self._observation_type is ObservationType.OCCU_MAP:
-            return specs.Array(
-                shape=(self._occu_map_size*2+5,), #map + [dgx,dgy,dgtheta,dgv,vx,vy,w]_robot_frame
-                dtype=np.float32,
-                name='observation_occupancy_map'
-            )
-        elif self._observation_type is ObservationType.OCCU_FLOW:
-            return specs.Array(
-                shape=(self._occu_map_size*4+8,), dtype=np.float32, name='observation_occupancy_flow')
-        elif self._observation_type is ObservationType.RAW_SCAN:
-            return specs.Array(
-                shape=(725,), dtype=np.float32, name='relative pose to goal')
+        # if self._observation_type is ObservationType.OCCU_MAP:
+        #     return specs.Array(
+        #         shape=(self._occu_map_size*2+5,), #map + [dgx,dgy,dgtheta,dgv,vx,vy,w]_robot_frame
+        #         dtype=np.float32,
+        #         name='observation_occupancy_map'
+        #     )
+        # elif self._observation_type is ObservationType.OCCU_FLOW:
+        #     return specs.Array(
+        #         shape=(self._occu_map_size*4+8,), dtype=np.float32, name='observation_occupancy_flow')
+        if self._observation_type is ObservationType.RAW_SCAN:
+            return NaviObsSpace({"scan":(720,),"robot_state":(5)}, dtype=np.float32, name='relative pose to goal')
         elif self._observation_type is ObservationType.TOY_STATE:
-            return specs.Array(
-                shape=(10,), dtype=np.float32, name='relative pose to goal')
+            return NaviObsSpace({"toy_joint_state":(10,)}, dtype=np.float32, name='relative pose to goal') 
+        elif self._observation_type is ObservationType.TIME_AWARE_RAW_SCAN:
+            return NaviObsSpace({"scan":(720,),"robot_state":(7)}, dtype=np.float32, name='relative pose to goal')
+        elif self._observation_type is ObservationType.TIME_AWARE_TOY_STATE:
+            return NaviObsSpace({"toy_joint_state":(12,)}, dtype=np.float32, name='relative pose to goal') 
         else:
             raise NotImplementedError
 
@@ -710,9 +762,9 @@ class CrowdWorld(dm_env.Environment):
         vy = (self.robot.vy * np.cos(goal_direction) - self.robot.vx * np.sin(goal_direction)) 
         
         self._current_scan = np.zeros(n_laser, dtype=np.float32)
-        semantic_occu_map = np.zeros((int(self._local_map_size/self._grid_size),
-                                      int(self._local_map_size/self._grid_size),
-                                      2),dtype=np.float32)
+        # semantic_occu_map = np.zeros((int(self._local_map_size/self._grid_size),
+        #                               int(self._local_map_size/self._grid_size),
+        #                               2),dtype=np.float32)
 
         self.scan_intersection = []
         static_ray_length,static_scan = self.get_static_scan()
@@ -736,49 +788,60 @@ class CrowdWorld(dm_env.Environment):
             self._current_scan[i] = static_ray_length[i]
             self.scan_intersection.append([(self.robot.px, self.robot.py), \
                                         (static_scan[i,0],static_scan[i,1])])
-            x = scan_obstacle_layer_local[i,0]
-            y = scan_obstacle_layer_local[i,1]
-            grid_x = int((x+self._local_map_size/2.)/self._grid_size)
-            grid_y = int((y+self._local_map_size/2.)/self._grid_size)
-            if grid_x>=0 and grid_x<semantic_occu_map.shape[0] \
-            and grid_y>=0 and grid_y<semantic_occu_map.shape[1]:
-                semantic_occu_map[grid_x,grid_y,0] = 1.0
+            # x = scan_obstacle_layer_local[i,0]
+            # y = scan_obstacle_layer_local[i,1]
+            # try:
+            #     grid_x = int((x+self._local_map_size/2.)/self._grid_size)
+            #     grid_y = int((y+self._local_map_size/2.)/self._grid_size)
+            # except:
+            #     print(np.array([self.robot.px,self.robot.py]),x, self._local_map_size, self._grid_size)
+            # if grid_x>=0 and grid_x<semantic_occu_map.shape[0] \
+            # and grid_y>=0 and grid_y<semantic_occu_map.shape[1]:
+            #     semantic_occu_map[grid_x,grid_y,0] = 1.0
         for i in range(n_laser):
             if i not in human_ray_indexs:
                 continue
             self._current_scan[i] = dynamic_ray_length[i]
             self.scan_intersection.append([(self.robot.px, self.robot.py), \
                                         (dynamic_scan[i,0],dynamic_scan[i,1])])
-            x = scan_human_layer_local[i,0]
-            y = scan_human_layer_local[i,1]
-            grid_x = int((x+self._local_map_size/2.)/self._grid_size)
-            grid_y = int((y+self._local_map_size/2.)/self._grid_size)
-            if grid_x>=0 and grid_x<semantic_occu_map.shape[0] \
-            and grid_y>=0 and grid_y<semantic_occu_map.shape[1]:
-                semantic_occu_map[grid_x,grid_y,1] = 1.0
+            # x = scan_human_layer_local[i,0]
+            # y = scan_human_layer_local[i,1]
+            # try:
+            #     grid_x = int((x+self._local_map_size/2.)/self._grid_size)
+            #     grid_y = int((y+self._local_map_size/2.)/self._grid_size)
+            # except:
+            #     print(x, self._local_map_size, self._grid_size)
+            # if grid_x>=0 and grid_x<semantic_occu_map.shape[0] \
+            # and grid_y>=0 and grid_y<semantic_occu_map.shape[1]:
+            #     semantic_occu_map[grid_x,grid_y,1] = 1.0
         
 
         if self._observation_type == ObservationType.RAW_SCAN:
             return np.hstack([self._current_scan,
                               np.array([dg,hf,vx,vy,self.robot.radius],dtype=np.float32)]) 
-        if self._observation_type == ObservationType.OCCU_MAP:
-            # if heading_diff_cosine>np.cos(np.pi/4): 
-            #     reward += 0.0005 TODO drl-vo reward term
+        elif self._observation_type == ObservationType.TIME_AWARE_RAW_SCAN:
+            return np.hstack([self._current_scan,
+                              np.array([self._num_episode_steps/self._max_episode_length,
+                                        np.log(self._max_episode_length),
+                                        dg, hf,vx,vy,self.robot.radius],dtype=np.float32)]) 
+        # elif self._observation_type == ObservationType.OCCU_MAP:
+        #     # if heading_diff_cosine>np.cos(np.pi/4): 
+        #     #     reward += 0.0005 TODO drl-vo reward term
 
-            # dgtheta = self.robot.goal_theta-self.robot.theta
-            # dgv = self.robot.goal_v-np.linalg.norm(np.array([self.robot.vx,self.robot.vy]))
+        #     # dgtheta = self.robot.goal_theta-self.robot.theta
+        #     # dgv = self.robot.goal_v-np.linalg.norm(np.array([self.robot.vx,self.robot.vy]))
 
-            return np.hstack([semantic_occu_map[...,1].flatten(),
-                              semantic_occu_map[...,0].flatten(),
-                              np.array([dg,hf,vx,vy,self.robot.radius],dtype=np.float32)]) 
-        elif self._observation_type == ObservationType.OCCU_FLOW:
-            self._semantic_occ_map_queue.pop(0)
-            self._semantic_occ_map_queue.append(semantic_occu_map)
-            return np.hstack([self._semantic_occ_map_queue[1][...,1].flatten(),
-                              self._semantic_occ_map_queue[1][...,0].flatten(),
-                              self._semantic_occ_map_queue[0][...,1].flatten(),
-                              self._semantic_occ_map_queue[0][...,0].flatten(),
-                              np.array([self.robot.px,self.robot.py,self.robot.theta, self.robot.gx,self.robot.gy,robot_v,robot_w,self.robot.radius],dtype=np.float32)])
+        #     return np.hstack([semantic_occu_map[...,1].flatten(),
+        #                       semantic_occu_map[...,0].flatten(),
+        #                       np.array([dg,hf,vx,vy,self.robot.radius],dtype=np.float32)]) 
+        # elif self._observation_type == ObservationType.OCCU_FLOW:
+        #     self._semantic_occ_map_queue.pop(0)
+        #     self._semantic_occ_map_queue.append(semantic_occu_map)
+        #     return np.hstack([self._semantic_occ_map_queue[1][...,1].flatten(),
+        #                       self._semantic_occ_map_queue[1][...,0].flatten(),
+        #                       self._semantic_occ_map_queue[0][...,1].flatten(),
+        #                       self._semantic_occ_map_queue[0][...,0].flatten(),
+        #                       np.array([self.robot.px,self.robot.py,self.robot.theta, self.robot.gx,self.robot.gy,robot_v,robot_w,self.robot.radius],dtype=np.float32)])
         elif self._observation_type == ObservationType.TOY_STATE:
             assert len(self.humans)==1
             #[dg, vpref, vx, vy, r, θ, ˜ vx, ˜ vy, ˜ px, ˜ py, ˜ r, r +˜ r, cos(θ), sin(θ), da],
@@ -790,6 +853,19 @@ class CrowdWorld(dm_env.Environment):
             h_vy = self.humans[0].vy * np.cos(goal_direction) - self.humans[0].vx * np.sin(goal_direction)
             return np.hstack([np.array([h_px,h_py,h_vx,h_vy,self.humans[0].radius+self.robot.radius],dtype=np.float32),
                               np.array([dg,hf,vx,vy,self.robot.radius],dtype=np.float32)]) 
+        elif self._observation_type == ObservationType.TIME_AWARE_TOY_STATE:
+            assert len(self.humans)==1
+            #[dg, vpref, vx, vy, r, θ, ˜ vx, ˜ vy, ˜ px, ˜ py, ˜ r, r +˜ r, cos(θ), sin(θ), da],
+            px = self.humans[0].px - self.robot.px
+            py = self.humans[0].py - self.robot.py
+            h_px = px * np.cos(goal_direction) + py * np.sin(goal_direction)
+            h_py = py * np.cos(goal_direction) - px * np.sin(goal_direction)
+            h_vx = self.humans[0].vx * np.cos(goal_direction) + self.humans[0].vy * np.sin(goal_direction)
+            h_vy = self.humans[0].vy * np.cos(goal_direction) - self.humans[0].vx * np.sin(goal_direction)
+            return np.hstack([np.array([h_px,h_py,h_vx,h_vy,self.humans[0].radius+self.robot.radius],dtype=np.float32),
+                              np.array([self._num_episode_steps/self._max_episode_length,
+                                        np.log(self._max_episode_length),
+                                        dg,hf,vx,vy,self.robot.radius],dtype=np.float32)]) 
         else:
             # rethink of dg,vx,vy,dgtheta,dgv,self.robot.radius
             # there is no information about theta of the robot in goal coordinate
@@ -807,7 +883,6 @@ class CrowdWorld(dm_env.Environment):
         return ob
 
     def step(self, action):
-
         # simulation
         human_actions = []
         for human in self.humans:
