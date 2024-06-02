@@ -1,0 +1,38 @@
+Bootstrap: docker
+From: nvidia/cuda:11.8.0-base-ubuntu20.04
+
+%post
+    # Update and install necessary system packages
+    apt-get update && apt-get install -y \
+        python3 \
+        python3-pip \
+        python3-venv \
+        git \
+        && apt-get clean
+
+    # Create a Python virtual environment
+    python3 -m venv /env
+    . /env/bin/activate
+
+    # Upgrade pip
+    pip install --upgrade pip
+	
+    # get project
+    git clone --branch controllable_navi https://github.com/wujiaxu/TCALF.git /opt/TCALF
+
+    # Install pip requirements
+    pip install -r /opt/TCALF/requirements.txt
+
+%environment
+    # Set up environment variables
+    source /env/bin/activate
+    export PATH=/env/bin:$PATH
+    export PROJECT_HOME=/opt/yourproject
+
+%runscript
+    # This script will be executed when the container runs
+    exec "$@"
+
+%labels
+    Author WUJIAXU
+    Version 1.0
