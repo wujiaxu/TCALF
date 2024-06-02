@@ -43,7 +43,10 @@ class GD_APSAgentConfig(DDPGAgentConfig):
     num_inference_steps: int = 10000
     balancing_factor: float = 1.0
     use_constraint: bool = True
-    sf_reward_target: float = 0.4
+    init_constraint_value: float = 10
+    max_constraint_value: float = 40
+    dynamic_contrain_step: int = 2000010
+    constraint_on: str = "Qsf"
     lagrangian_k_p: float = 0.0003
     lagrangian_k_i: float = 0.0003
     lagrangian_k_d: float = 0.0003
@@ -149,6 +152,7 @@ class APSAgent(DDPGAgent):
                              cfg.device)
         
         self.balancing_factor = cfg.balancing_factor
+        self.constrain_value = cfg.init_constraint_value
         self.lagrange = Lagrange(cfg.balancing_factor,cfg.lagrange_multiplier_upper_bound,cfg.lagrangian_k_p,cfg.lagrangian_k_i,cfg.lagrangian_k_d)
         self.update_lagrange_every_steps = self.update_every_steps * cfg.lagrange_update_interval
         
@@ -217,6 +221,13 @@ class APSAgent(DDPGAgent):
         meta = OrderedDict()
         meta['task'] = task_array
         return meta
+    
+    def update_constraint_value(self,step,new_value=None):
+        if new_value:
+            self.constrain_value = new_value
+        else:
+            self.constrain_value = self.cfg.init_constraint_value\
+                                    +step*(self.cfg.max_constraint_value-self.cfg.init_constraint_value)/4000010 #TODO 
 
     # pylint: disable=unused-argument
     def update_meta(
@@ -483,8 +494,10 @@ class APSAgent(DDPGAgent):
             metrics['critic_loss'] = critic_loss.item()
 
         # update balancing_factor
+        if self.cfg.use_constraint:
+            self.update_constraint_value(step)
         if step % self.update_lagrange_every_steps ==0 and self.cfg.use_constraint:
-            cost_limit = -self.cfg.sf_reward_target
+            cost_limit = -self.constrain_value
             cost = -target_Q.mean().item() #-intr_sf_reward.mean().cpu().item()
             self.lagrange.update_lagrange_multiplier(cost,cost_limit)
             self.balancing_factor = self.lagrange.lagrangian_multiplier.to(self.cfg.device)

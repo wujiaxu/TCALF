@@ -97,7 +97,7 @@ class NaviObsSpace:
   @property
   def shape(self):
     """Returns a `tuple` specifying the array shape."""
-    return self._shape_total
+    return (self._shape_total,)
 
   @property
   def dtype(self):
@@ -581,11 +581,11 @@ class CrowdWorld(dm_env.Environment):
         #     return specs.Array(
         #         shape=(self._occu_map_size*4+8,), dtype=np.float32, name='observation_occupancy_flow')
         if self._observation_type is ObservationType.RAW_SCAN:
-            return NaviObsSpace({"scan":(720,),"robot_state":(5)}, dtype=np.float32, name='relative pose to goal')
+            return NaviObsSpace({"scan":(720,),"robot_state":(5,)}, dtype=np.float32, name='relative pose to goal')
         elif self._observation_type is ObservationType.TOY_STATE:
             return NaviObsSpace({"toy_joint_state":(10,)}, dtype=np.float32, name='relative pose to goal') 
         elif self._observation_type is ObservationType.TIME_AWARE_RAW_SCAN:
-            return NaviObsSpace({"scan":(720,),"robot_state":(7)}, dtype=np.float32, name='relative pose to goal')
+            return NaviObsSpace({"scan":(720,),"robot_state":(7,)}, dtype=np.float32, name='relative pose to goal')
         elif self._observation_type is ObservationType.TIME_AWARE_TOY_STATE:
             return NaviObsSpace({"toy_joint_state":(12,)}, dtype=np.float32, name='relative pose to goal') 
         else:

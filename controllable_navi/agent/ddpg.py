@@ -20,11 +20,11 @@ from traitlets import Dict
 
 from url_benchmark.dmc import TimeStep
 from controllable_navi.in_memory_replay_buffer import ReplayBuffer
-from url_benchmark import utils
+from controllable_navi import utils
 from .fb_modules import mlp
-# TODO from controllable_navi.agent.Transformer.models.ST_Transformer import TTransformer, husformerEncoder
-from controllable_navi.agent.Transformer.models.position_embedding import SinusoidalPositionalEmbedding
-import math
+from controllable_navi.agent.encoders import MultiModalEncoder,EncoderConfig
+from controllable_navi.agent.sequence_encoders import SequenceEncoder,SequenceEncoderConfig
+from controllable_navi.crowd_sim.crowd_sim import NaviObsSpace
 # MetaDict = tp.Mapping[str, tp.Union[np.ndarray, torch.Tensor]]
 MetaDict = tp.Mapping[str, np.ndarray]
 
@@ -35,8 +35,10 @@ class DDPGAgentConfig:
     name: str = "ddpg"
     reward_free: bool = omegaconf.II("reward_free")
     obs_type: str = omegaconf.MISSING  # to be specified later
-    obs_shape: tp.Tuple[int, ...] = omegaconf.MISSING  # to be specified later
+    obs_shape: dict = omegaconf.MISSING  # to be specified later
     action_shape: tp.Tuple[int, ...] = omegaconf.MISSING  # to be specified later
+    encoder_config:EncoderConfig=EncoderConfig()
+    sequence_encoder_config:SequenceEncoderConfig=SequenceEncoderConfig()
     device: str = omegaconf.II("device")
     lr: float = 1e-5
     critic_target_tau: float = 0.01
@@ -57,185 +59,6 @@ class DDPGAgentConfig:
 
 cs = ConfigStore.instance()
 cs.store(group="agent", name="ddpg", node=DDPGAgentConfig)
-    
-class Encoder(nn.Module):
-    def __init__(self, obs_shape) -> None:
-        super().__init__()
-
-        assert len(obs_shape) == 3
-        self.repr_dim = 32 * 10 * 10
-
-        self.convnet = nn.Sequential(nn.Conv2d(obs_shape[0], 32, 3, stride=2),
-                                     nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
-                                     nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
-                                     nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
-                                     nn.ReLU())
-
-        self.apply(utils.weight_init)
-
-    def forward(self, obs) -> Any:
-        obs = obs / 255.0 - 0.5
-        h = self.convnet(obs)
-        h = h.view(h.shape[0], -1)
-        return h
-    
-class StateEncoder(nn.Module):
-    def __init__(self, obs_shape) -> None:
-        super().__init__()
-        assert len(obs_shape) == 1
-        feature_dim = 32
-        self.net = nn.Sequential(nn.Linear(obs_shape[0], feature_dim),
-                                   nn.LayerNorm(feature_dim))
-    def forward(self,x):
-        return self.net(x)
-
-class ScanEncoder(nn.Module):
-    def __init__(self, obs_shape) -> None:
-        super().__init__()
-        assert len(obs_shape) == 1
-        feature_dim = 128
-        input_channels = 1
-        # First convolutional layer
-        self.conv1 = nn.Conv1d(in_channels=input_channels, out_channels=32, kernel_size=5, stride=2)
-        # Second convolutional layer
-        self.conv2 = nn.Conv1d(in_channels=32, out_channels=32, kernel_size=3, stride=2)
-        # Fully connected layer
-        self.fc1 = nn.Linear(in_features=self._get_conv_output_size(input_channels), out_features=256)
-        # Output layer (if needed, depends on the task)
-        self.fc2 = nn.Linear(in_features=256, out_features=feature_dim)
-
-    def _get_conv_output_size(self, input_channels):
-        # Function to compute the size of the output from the conv layers
-        # Assuming input size is (N, input_channels, L) where L is the length of the sequence
-        dummy_input = torch.zeros(1, input_channels, 100)  # Replace 100 with an appropriate sequence length
-        dummy_output = self._forward_conv_layers(dummy_input)
-        return int(torch.flatten(dummy_output, 1).size(1))
-    
-    def _forward_conv_layers(self, x):
-        x = F.relu(self.conv1(x))
-        x = F.relu(self.conv2(x))
-        return x
-    
-    def forward(self, x):
-        x = self._forward_conv_layers(x)
-        x = torch.flatten(x, 1)  # Flatten the tensor except for the batch dimension
-        x = F.relu(self.fc1(x))
-        x = self.fc2(x)
-        return x
-
-class CrowdEncoder(nn.Module):
-    def __init__(self, obs_shape_dict) -> None:
-        super().__init__()
-        assert isinstance(obs_shape_dict,dict)
-        self.sub_encoders = {}
-        self.obs_shape_dict = obs_shape_dict
-        for name in obs_shape_dict.keys():
-            input_shape,input_size = obs_shape_dict[name]
-            if 'scan' in name:
-                self.sub_encoders[name]=ScanEncoder(input_shape)
-            else:
-                self.sub_encoders[name]=StateEncoder(input_shape)
-    def forward(self,x):
-        start = 0
-        hs = []
-        for name in self.obs_shape_dict.keys():
-            input_shape,input_size = self.obs_shape_dict[name]
-            in_ = x[...,start:start+input_size]
-            hs.append(self.sub_encoders[name](in_))
-            start = input_size
-        h = torch.cat(hs, dim=-1)
-        return h
-
-
-
-class TransformerEncoderBlock(nn.Module):
-    def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0.1):
-        super(TransformerEncoderBlock, self).__init__()
-        self.self_attn = nn.MultiheadAttention(d_model, nhead, dropout=dropout)
-        self.linear1 = nn.Linear(d_model, dim_feedforward)
-        self.dropout = nn.Dropout(dropout)
-        self.linear2 = nn.Linear(dim_feedforward, d_model)
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model)
-        self.dropout1 = nn.Dropout(dropout)
-        self.dropout2 = nn.Dropout(dropout)
-
-    def forward(self, src, src_mask=None, src_key_padding_mask=None):
-        src2 = self.self_attn(src, src, src, attn_mask=src_mask, key_padding_mask=src_key_padding_mask)[0]
-        if torch.sum(torch.isnan(src2)):
-            print("src2")
-            print(src,src_mask,src_key_padding_mask)
-            raise ValueError
-        src = src + self.dropout1(src2)
-        src = self.norm1(src)
-        src2 = self.linear2(self.dropout(F.gelu(self.linear1(src))))
-        src = src + self.dropout2(src2)
-        src = self.norm2(src)
-        return src
-
-class Transformer(nn.Module):
-    def __init__(self, num_layers, d_model, nhead, dim_feedforward=2048, dropout=0.1):
-        super(Transformer, self).__init__()
-        self.encoder_layers = nn.ModuleList([TransformerEncoderBlock(d_model, nhead, dim_feedforward, dropout) for _ in range(num_layers)])
-        self.d_model = d_model
-        self.nhead = nhead
-
-    def forward(self, src, src_mask=None, src_key_padding_mask=None):
-        for i, encoder in enumerate(self.encoder_layers):
-            # print(i,src)
-            src = encoder(src, src_mask, src_key_padding_mask)
-        return src
-    
-class SequenceEncoder(nn.Module):
-    embed_func: tp.Union[Encoder, nn.Identity]
-    def __init__(self,obs_dim, embed_func,num_layers=2, nhead=1, dim_feedforward=2048, dropout=0.1):
-        super(SequenceEncoder, self).__init__()
-        self.embed_func = embed_func
-        if isinstance(self.embed_func,nn.Identity):
-            embed_size = obs_dim
-        else:
-            embed_size  = self.embed_func.repr_dim  
-        d_model = embed_size
-        self.pos_encoder = SinusoidalPositionalEmbedding(embed_size)
-        self.transformer = Transformer(num_layers, d_model, nhead, dim_feedforward, dropout)
-        self.fc_out = nn.Linear(d_model, embed_size)
-        self.d_model = d_model
-        return
-    
-    def forward(self, src_in, mask):
-        # mask processing
-        src_mask = torch.bmm(mask.unsqueeze(2), mask.unsqueeze(1)) # N, L, L
-        src_key_padding_mask = mask # N, L
-        # input embedding
-        src = self.embed_func(src_in) # N, L, C
-        # print("input",src_in)
-        # print("src",src)
-        if torch.sum(torch.isnan(src)):
-            print("src")
-            # print(src_in,src)
-            raise ValueError
-        src = src + self.pos_encoder(src_in[:, :, 0])
-        if torch.sum(torch.isnan(src)):
-            print("src pos")
-            raise ValueError
-        src = src.transpose(0, 1)  # Transformer expects (sequence_length, batch_size, d_model)
-        output = self.transformer(src, src_mask, src_key_padding_mask) # N, L, C
-        output = output.transpose(0, 1) # N, L, C
-        if torch.sum(torch.isnan(output)):
-            print("transformer")
-            raise ValueError
-        mask_expanded = mask.unsqueeze(-1).expand(-1, -1, self.d_model).to(torch.bool)# N, L, C
-
-        # Set masked elements to a very large negative value
-        masked_output = output.masked_fill(~mask_expanded, float('-inf')) # N, L, C
-
-        # Apply max pooling
-        aggregated_vector, _ = masked_output.max(dim=1)  # (batch_size, d_model)
-        output = self.fc_out(aggregated_vector)
-        if torch.sum(torch.isnan(output)):
-            print("output")
-            raise ValueError
-        return output
     
 class Actor(nn.Module):
     def __init__(self, obs_type, obs_dim, action_dim, feature_dim, hidden_dim) -> None:
@@ -276,7 +99,6 @@ class Actor(nn.Module):
 
         dist = utils.TruncatedNormal(mu, std)
         return dist
-
 
 class Critic(nn.Module):
     def __init__(self, obs_type, obs_dim, action_dim, feature_dim, hidden_dim) -> None:
@@ -328,7 +150,7 @@ class Critic(nn.Module):
 
 
 class DDPGAgent:
-    encoder: tp.Union[Encoder, SequenceEncoder, nn.Identity, CrowdEncoder]
+    encoder: tp.Union[SequenceEncoder, nn.Identity, MultiModalEncoder]
     aug: tp.Union[utils.RandomShiftsAug, nn.Identity]
     # pylint: disable=unused-argument
     def __init__(self, meta_dim: int = 0, **kwargs: tp.Any) -> None:
@@ -342,23 +164,24 @@ class DDPGAgent:
         self.action_dim = cfg.action_shape[0]
         self.solved_meta = None
         # self.update_encoder = update_encoder  # used in subclasses
-        # models
-        if 'pixels' in cfg.obs_type: #TODO
-            self.aug = utils.RandomShiftsAug(pad=4)
-            self.encoder = Encoder(cfg.obs_shape).to(cfg.device)
-            self.obs_dim = self.encoder.repr_dim + meta_dim
-        elif 'toy' not in cfg.obs_type:
-            self.aug = nn.Identity()
-            self.encoder = CrowdEncoder(cfg.obs_shape)
-            self.obs_dim = self.encoder.repr_dim + meta_dim
-        else:
+        _shape_total = 0
+        for compo_name in cfg.obs_shape.keys():
+            shape,dim = cfg.obs_shape[compo_name]
+            _shape_total+=dim
+        if 'toy' in cfg.obs_type and not cfg.use_sequence:
             self.aug = nn.Identity()
             self.encoder = nn.Identity()
-            self.obs_dim = cfg.obs_shape[0] + meta_dim
+            self.obs_dim = _shape_total + meta_dim
+        else:
+            self.aug = nn.Identity()
+            self.encoder = MultiModalEncoder(cfg.obs_shape,cfg.encoder_config) 
+            #TODO get parameter ValueError('optimizer got an empty parameter list')
+            self.encoder.to_device(cfg.device)
+            self.obs_dim = self.encoder.repr_dim + meta_dim
         # for sequence input case
         if cfg.use_sequence:
-            self.encoder = SequenceEncoder(cfg.obs_shape[0], self.encoder).to(cfg.device)
-        
+            self.encoder = SequenceEncoder(_shape_total, self.encoder,cfg.sequence_encoder_config).to(cfg.device)
+            
         self.actor = Actor(cfg.obs_type, self.obs_dim, self.action_dim,
                            cfg.feature_dim, cfg.hidden_dim).to(cfg.device)
 
@@ -370,13 +193,8 @@ class DDPGAgent:
         # optimizers
 
         self.encoder_opt: tp.Optional[torch.optim.Adam] = None
-        if cfg.obs_type == 'pixels':
-            self.encoder_opt = torch.optim.Adam(self.encoder.parameters(), lr=cfg.lr)
-        elif cfg.obs_type == 'om':
-            self.encoder_opt = torch.optim.Adam(self.encoder.parameters(), lr=cfg.lr)
-        elif cfg.obs_type == 'of':
-            self.encoder_opt = torch.optim.Adam(self.encoder.parameters(), lr=cfg.lr)
-        elif cfg.use_sequence:
+
+        if 'toy' not in cfg.obs_type or cfg.use_sequence:
             self.encoder_opt = torch.optim.Adam(self.encoder.parameters(), lr=cfg.lr)
         self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=cfg.lr)
         self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=cfg.lr)
@@ -401,9 +219,14 @@ class DDPGAgent:
 
     def train(self, training: bool = True) -> None:
         self.training = training
-        self.encoder.train(training)
-        self.actor.train(training)
-        self.critic.train(training)
+        if training:
+            self.encoder.train()
+            self.actor.train()
+            self.critic.train()
+        else:
+            self.encoder.eval()
+            self.actor.eval()
+            self.critic.eval()
 
     def init_from(self, other) -> None:
         # copy parameters over

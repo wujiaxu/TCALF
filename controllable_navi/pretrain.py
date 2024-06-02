@@ -4,6 +4,8 @@
 # LICENSE file in the root directory of this source tree.
 from pathlib import Path
 import sys
+
+from sympy import sequence
 base = Path(__file__).absolute().parents[1]
 # we need to add base repo to be able to import url_benchmark
 # we need to add url_benchmarl to be able to reload legacy checkpoints
@@ -314,6 +316,7 @@ class BaseWorkspace(tp.Generic[C]):
         return _goals.get_reward_function(self.cfg.custom_reward)
 
     def eval(self) -> None:
+        self.agent.train(False)
         step, episode = 0, 0
         success_num = 0
         eval_until_episode = utils.Until(self.cfg.num_eval_episodes)
@@ -375,6 +378,7 @@ class BaseWorkspace(tp.Generic[C]):
             episode += 1
             self.video_recorder.save(f'{self.global_frame}_{episode}.mp4')
 
+        self.agent.train(True)
         self.eval_rewards_history.append(float(np.mean(rewards)))
         with self.logger.log_and_dump_ctx(self.global_frame, ty='eval') as log:
             # if is_d4rl_task:

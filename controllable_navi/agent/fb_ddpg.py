@@ -27,7 +27,7 @@ from url_benchmark.dmc import TimeStep
 from url_benchmark import goals as _goals
 from .ddpg import MetaDict
 from .fb_modules import IdentityMap
-from .ddpg import Encoder,CrowdEncoderOM,CrowdEncoderOF
+# from .ddpg import Encoder,CrowdEncoderOM,CrowdEncoderOF #TODO
 from .fb_modules import Actor, DiagGaussianActor, ForwardMap, BackwardMap, OnlineCov
 
 
@@ -99,19 +99,19 @@ class FBDDPGAgent:
         self.action_dim = cfg.action_shape[0]
         self.solved_meta: tp.Any = None
 
-        # models
-        if cfg.obs_type == 'pixels':
-            self.aug: nn.Module = utils.RandomShiftsAug(pad=4)
-            self.encoder: nn.Module = Encoder(cfg.obs_shape).to(cfg.device)
-            self.obs_dim = self.encoder.repr_dim
-        elif cfg.obs_type == 'om':
-            self.aug = nn.Identity()
-            self.encoder = CrowdEncoderOM(cfg.obs_shape).to(cfg.device)
-            self.obs_dim = self.encoder.repr_dim
-        else:
-            self.aug = nn.Identity()
-            self.encoder = nn.Identity()
-            self.obs_dim = cfg.obs_shape[0]
+        # # models
+        # if cfg.obs_type == 'pixels':
+        #     self.aug: nn.Module = utils.RandomShiftsAug(pad=4)
+        #     self.encoder: nn.Module = Encoder(cfg.obs_shape).to(cfg.device)
+        #     self.obs_dim = self.encoder.repr_dim
+        # elif cfg.obs_type == 'om':
+        #     self.aug = nn.Identity()
+        #     self.encoder = CrowdEncoderOM(cfg.obs_shape).to(cfg.device)
+        #     self.obs_dim = self.encoder.repr_dim
+        # else:TODO
+        self.aug = nn.Identity()
+        self.encoder = nn.Identity()
+        self.obs_dim = cfg.obs_shape[0]
         if cfg.feature_dim < self.obs_dim:
             logger.warning(f"feature_dim {cfg.feature_dim} should not be smaller that obs_dim {self.obs_dim}")
         goal_dim = self.obs_dim
