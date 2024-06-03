@@ -31,7 +31,7 @@ from controllable_navi.crowd_sim.utils.obstacle import *
 import dm_env
 from dm_env import specs
 import enum
-from url_benchmark.dmc import ExtendedTimeStep #,TimeStep
+from controllable_navi.dmc import ExtendedTimeStep #,TimeStep
 from hydra.core.config_store import ConfigStore
 # import omegaconf
 

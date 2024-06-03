@@ -7,9 +7,9 @@ import sys
 
 from sympy import sequence
 base = Path(__file__).absolute().parents[1]
-# we need to add base repo to be able to import url_benchmark
-# we need to add url_benchmarl to be able to reload legacy checkpoints
-for fp in [base, base / "url_benchmark",base / "controllable_navi"]:
+# we need to add base repo to be able to import controllable_navi
+# we need to add controllable_navi to be able to reload legacy checkpoints
+for fp in [base, base / "controllable_navi"]:
     assert fp.exists()
     if str(fp) not in sys.path:
         sys.path.append(str(fp))
@@ -39,26 +39,21 @@ import wandb
 import omegaconf as omgcf
 # from dm_env import specs
 
-from url_benchmark import dmc
+from controllable_navi import dmc
 from dm_env import specs
-from url_benchmark import utils
-# from url_benchmark import goals as _goals
+from controllable_navi import utils
 from controllable_navi import goals as _goals
 from controllable_navi.logger import Logger
 from controllable_navi.in_memory_replay_buffer import ReplayBuffer
-from url_benchmark.video import TrainVideoRecorder, VideoRecorder
-# from url_benchmark import agent as agents
+from controllable_navi.video import TrainVideoRecorder, VideoRecorder
 from controllable_navi import agent as agents
 from controllable_navi import crowd_sim as crowd_sims
 from controllable_navi.crowd_sim.utils.info import *
-# from url_benchmark.d4rl_benchmark import D4RLReplayBufferBuilder, D4RLWrapper
-# from url_benchmark.gridworld.env import build_gridworld_task
 
 logger = logging.getLogger(__name__)
 torch.backends.cudnn.benchmark = True
 # os.environ['WANDB_MODE']='offline'
 
-# from url_benchmark.dmc_benchmark import PRIMAL_TASKS
 
 
 # # # Config # # #
@@ -143,7 +138,7 @@ C = tp.TypeVar("C", bound=Config) # Can be any subtype of Config
 
 def _update_legacy_class(obj: tp.Any, classes: tp.Sequence[tp.Type[tp.Any]]) -> tp.Any:
     """Updates a legacy class (eg: agent.FBDDPGAgent) to the new
-    class (url_benchmark.agent.FBDDPGAgent)
+    class (controllable_navi.agent.FBDDPGAgent)
 
     Parameters
     ----------
@@ -285,7 +280,7 @@ class BaseWorkspace(tp.Generic[C]):
         self.global_episode = 0
         self.eval_rewards_history: tp.List[float] = []
         self._checkpoint_filepath = self.work_dir / "models" / "latest.pt"
-        # print(self._checkpoint_filepath)<-/root/controllable_agent/url_benchmark/exp_local/2024.04.01/131258_aps_crowdnavi_PointGoalNavi_online/models/latest.pt  this is just a file name, no file till checkpoint
+        
         if self._checkpoint_filepath.exists():
             self.load_checkpoint(self._checkpoint_filepath)
         elif cfg.load_model is not None:

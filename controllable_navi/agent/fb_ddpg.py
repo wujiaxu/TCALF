@@ -20,11 +20,11 @@ from hydra.core.config_store import ConfigStore
 import omegaconf
 from dm_env import specs
 
-from url_benchmark import utils
-# from url_benchmark import replay_buffer as rb
-from url_benchmark.in_memory_replay_buffer import ReplayBuffer
-from url_benchmark.dmc import TimeStep
-from url_benchmark import goals as _goals
+from controllable_navi import utils
+# from controllable_navi import replay_buffer as rb
+from controllable_navi.in_memory_replay_buffer import ReplayBuffer
+from controllable_navi.dmc import TimeStep
+from controllable_navi import goals as _goals
 from .ddpg import MetaDict
 from .fb_modules import IdentityMap
 # from .ddpg import Encoder,CrowdEncoderOM,CrowdEncoderOF #TODO

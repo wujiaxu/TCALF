@@ -18,7 +18,7 @@ from hydra.core.config_store import ConfigStore
 import omegaconf
 from traitlets import Dict
 
-from url_benchmark.dmc import TimeStep
+from controllable_navi.dmc import TimeStep
 from controllable_navi.in_memory_replay_buffer import ReplayBuffer
 from controllable_navi import utils
 from .fb_modules import mlp

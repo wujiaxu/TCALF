@@ -34,9 +34,9 @@ try:
     base = Path(controllable_navi.__file__).absolute().parents[1]
 except ImportError:
     base = Path(__file__).absolute().parents[1]
-# we need to add base repo to be able to import url_benchmark
-# we need to add url_benchmar to be able to reload legacy checkpoints
-for fp in [base, base / "url_benchmark",base / "controllable_navi"]:
+# we need to add base repo to be able to import controllable_navi
+# we need to add controllable_navi to be able to reload legacy checkpoints
+for fp in [base,base / "controllable_navi"]:
     assert fp.exists()
     if str(fp) not in sys.path:
         sys.path.append(str(fp))
@@ -47,8 +47,8 @@ import torch
 import torch.nn.functional as F
 from controllable_navi import runner
 from controllable_navi import goals
-from url_benchmark import utils
-from url_benchmark.video import VideoRecorder
+from controllable_navi import utils
+from controllable_navi.video import VideoRecorder
 logger = logging.getLogger(__name__)
 
 import matplotlib.pyplot as plt

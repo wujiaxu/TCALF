@@ -2,12 +2,6 @@ from pathlib import Path
 import sys
 base = Path(__file__).absolute().parents[1]
 print(base)
-# we need to add base repo to be able to import url_benchmark
-# we need to add url_benchmarl to be able to reload legacy checkpoints
-for fp in [base, base / "url_benchmark"]:
-    assert fp.exists()
-    if str(fp) not in sys.path:
-        sys.path.append(str(fp))
 for fp in [base, base / "controllable_navi"]:
     assert fp.exists()
     if str(fp) not in sys.path:
@@ -15,8 +9,8 @@ for fp in [base, base / "controllable_navi"]:
 import dm_env
 from controllable_navi.crowd_sim.crowd_sim import build_crowdworld_task
 import numpy as np
-from url_benchmark.video import VideoRecorder
-from url_benchmark import dmc
+from controllable_navi.video import VideoRecorder
+from controllable_navi import dmc
 
 recorder = VideoRecorder(base / "controllable_navi", camera_id=0, use_wandb=False)
 recorder.enabled = True

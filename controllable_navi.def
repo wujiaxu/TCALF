@@ -17,6 +17,8 @@ From: nvidia/cuda:11.8.0-base-ubuntu20.04
     # Upgrade pip
     pip install --upgrade pip
 	
+    # get pytorch-cuda
+    
     # get project
     git clone --branch controllable_navi https://github.com/wujiaxu/TCALF.git /opt/TCALF
 

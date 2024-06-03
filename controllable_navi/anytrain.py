@@ -15,11 +15,10 @@ import hydra
 from hydra.core.config_store import ConfigStore
 import torch
 
-from url_benchmark import dmc
-from url_benchmark import utils
-from url_benchmark import agent as agents
-from url_benchmark.d4rl_benchmark import D4RLConfig, D4RLReplayBufferBuilder
-from url_benchmark.video import TrainVideoRecorder
+from controllable_navi import dmc
+from controllable_navi import utils
+from controllable_navi import agent as agents
+from controllable_navi.video import TrainVideoRecorder
 
 logger = logging.getLogger(__name__)
 torch.backends.cudnn.benchmark = True
@@ -27,9 +26,9 @@ torch.backends.cudnn.benchmark = True
 from pathlib import Path
 import sys
 base = Path(__file__).absolute().parents[1]
-# we need to add base repo to be able to import url_benchmark
-# we need to add url_benchmarl to be able to reload legacy checkpoints
-for fp in [base, base / "url_benchmark", base / "controllable_navi"]:
+# we need to add base repo to be able to import controllable_navi
+# we need to add controllable_navi to be able to reload legacy checkpoints
+for fp in [base, base / "controllable_navi"]:
     assert fp.exists()
     if str(fp) not in sys.path:
         sys.path.append(str(fp))

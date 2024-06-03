@@ -22,7 +22,7 @@ except ImportError:
     from typing_extensions import Protocol  # type: ignore
 
 
-class Trainable(Protocol):  # cannot from url_benchmark import agent
+class Trainable(Protocol):  
     @property
     def training(self) -> bool:
         ...

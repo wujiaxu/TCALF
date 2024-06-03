@@ -12,11 +12,11 @@ from torch import nn
 import torch.nn.functional as F
 from collections import OrderedDict
 
-from url_benchmark import utils
+from controllable_navi import utils
 from hydra.core.config_store import ConfigStore
 import omegaconf
 
-from url_benchmark.dmc import TimeStep
+from controllable_navi.dmc import TimeStep
 from .ddpg import DDPGAgent, MetaDict, DDPGAgentConfig,Actor,Critic
 from controllable_navi.in_memory_replay_buffer import ReplayBuffer
 from typing import Any, Dict, Tuple
@@ -43,10 +43,10 @@ class GD_APSAgentConfig(DDPGAgentConfig):
     num_inference_steps: int = 10000
     balancing_factor: float = 1.0
     use_constraint: bool = True
-    init_constraint_value: float = 10
-    max_constraint_value: float = 40
-    dynamic_contrain_step: int = 2000010
-    constraint_on: str = "Qsf"
+    init_constraint_value: float = 1.2
+    max_constraint_value: float = 1.8
+    dynamic_contrain_step: int = 2000000
+    constraint_on: str = "r_intr"
     lagrangian_k_p: float = 0.0003
     lagrangian_k_i: float = 0.0003
     lagrangian_k_d: float = 0.0003
@@ -227,7 +227,7 @@ class APSAgent(DDPGAgent):
             self.constrain_value = new_value
         else:
             self.constrain_value = self.cfg.init_constraint_value\
-                                    +step*(self.cfg.max_constraint_value-self.cfg.init_constraint_value)/4000010 #TODO 
+                                    +step*(self.cfg.max_constraint_value-self.cfg.init_constraint_value)/self.cfg.dynamic_contrain_step #TODO 
 
     # pylint: disable=unused-argument
     def update_meta(
@@ -498,7 +498,7 @@ class APSAgent(DDPGAgent):
             self.update_constraint_value(step)
         if step % self.update_lagrange_every_steps ==0 and self.cfg.use_constraint:
             cost_limit = -self.constrain_value
-            cost = -target_Q.mean().item() #-intr_sf_reward.mean().cpu().item()
+            cost = -reward.mean().item() #-intr_sf_reward.mean().cpu().item() or Q value
             self.lagrange.update_lagrange_multiplier(cost,cost_limit)
             self.balancing_factor = self.lagrange.lagrangian_multiplier.to(self.cfg.device)
             if self.use_tb or self.use_wandb:

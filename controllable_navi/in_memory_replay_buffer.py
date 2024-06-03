@@ -15,8 +15,8 @@ from sympy import NDimArray
 import torch
 from dm_env import specs, TimeStep
 from tqdm import tqdm
-from url_benchmark.replay_buffer import EpisodeBatch
-from url_benchmark.dmc import ExtendedGoalTimeStep
+from controllable_navi.replay_buffer import EpisodeBatch
+from controllable_navi.dmc import ExtendedGoalTimeStep
 from controllable_navi.crowd_sim.utils.info import *
 import matplotlib.pyplot as plt
 from scipy.stats import gaussian_kde

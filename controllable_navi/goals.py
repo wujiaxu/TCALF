@@ -1,7 +1,24 @@
-from url_benchmark.goals import BaseReward
 import numpy as np
 import typing as tp
+from controllable_navi import dmc
+class BaseReward:
 
+    def __init__(self, seed: tp.Optional[int] = None) -> None:
+        self._env: dmc.EnvWrapper  # to be instantiated in subclasses
+        self._rng = np.random.RandomState(seed)
+
+    def get_goal(self, goal_space: str) -> np.ndarray:
+        raise NotImplementedError
+
+    def from_physics(self, physics: np.ndarray) -> float:
+        "careful this is not threadsafe"
+        with self._env.physics.reset_context():
+            self._env.physics.set_state(physics)
+        return self.from_env(self._env)
+
+    def from_env(self, env: dmc.EnvWrapper) -> float:
+        raise NotImplementedError
+    
 def get_reward_function(name: str) -> BaseReward:
     if name.split("_")[0] == "crowdnavi":
         return CrowdNaviReward(name.split("_")[1])

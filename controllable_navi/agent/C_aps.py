@@ -12,11 +12,11 @@ from torch import nn
 import torch.nn.functional as F
 from collections import OrderedDict
 
-from url_benchmark import utils
+from controllable_navi import utils
 from hydra.core.config_store import ConfigStore
 import omegaconf
 
-from url_benchmark.dmc import TimeStep
+from controllable_navi.dmc import TimeStep
 from .ddpg import DDPGAgent, MetaDict, DDPGAgentConfig
 from controllable_navi.in_memory_replay_buffer import ReplayBuffer
 from typing import Any, Dict, Tuple

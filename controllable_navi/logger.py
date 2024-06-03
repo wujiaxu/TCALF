@@ -15,7 +15,7 @@ import wandb
 from termcolor import colored
 from torch.utils.tensorboard import SummaryWriter
 from controllable_navi.in_memory_replay_buffer import ReplayBuffer
-from url_benchmark.hiplogs import HipLog
+from controllable_navi.hiplogs import HipLog
 import matplotlib.pyplot as plt
 import numpy as np
 
