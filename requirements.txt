@@ -42,4 +42,4 @@ nevergrad
 gitpython
 
 # for crowd navi
-shapely=2.0.3
+shapely==2.0.3
