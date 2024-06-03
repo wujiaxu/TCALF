@@ -6,8 +6,6 @@ import dataclasses
 import shapely
 from shapely.geometry import Polygon, LineString, MultiPolygon, LinearRing,Point
 
-import gym
-from gym import spaces
 import matplotlib.pyplot as plt
 from matplotlib import collections as mc
 import matplotlib.lines as mlines

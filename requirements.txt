@@ -20,7 +20,7 @@ opencv-python
 hiplot
 termcolor
 # d4rl
-gym>=0.21,<0.22
+# gym>=0.21,<0.22
 patchelf
 
 # for the demo

@@ -15,7 +15,8 @@ From: nvidia/cuda:11.8.0-base-ubuntu20.04
     . /env/bin/activate
 
     # Upgrade pip
-    pip install --upgrade pip
+    pip install pip==21
+    pip install wheel==0.38.0
 	
     # get pytorch-cuda
     pip install torch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2 --index-url https://download.pytorch.org/whl/cu118
