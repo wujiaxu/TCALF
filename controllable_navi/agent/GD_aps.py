@@ -32,7 +32,7 @@ class GD_APSAgentConfig(DDPGAgentConfig):
     _target_: str = "controllable_navi.agent.GD_aps.APSAgent" 
     name: str = "gd_aps"
     update_encoder: bool = omegaconf.II("update_encoder")
-    sf_dim: int = 10
+    sf_dim: int = 5
     update_task_every_step: int = 5
     knn_rms: bool = True
     knn_k: int = 12
@@ -43,16 +43,16 @@ class GD_APSAgentConfig(DDPGAgentConfig):
     num_inference_steps: int = 10000
     balancing_factor: float = 1.0
     use_constraint: bool = True
-    init_constraint_value: float = 1.2
+    init_constraint_value: float = 1.25
     max_constraint_value: float = 1.8
     dynamic_contrain_step: int = 2000000
     constraint_on: str = "r_intr"
     lagrangian_k_p: float = 0.0003
     lagrangian_k_i: float = 0.0003
     lagrangian_k_d: float = 0.0003
-    lagrange_multiplier_upper_bound: float = 0.01
+    lagrange_multiplier_upper_bound: float = 10.
     lagrange_update_interval: int = 1
-    use_self_supervised_encoder: bool = True
+    use_self_supervised_encoder: bool = False
     self_supervised_encoder:str = "IDP"
     sse_dim: int = 128
 

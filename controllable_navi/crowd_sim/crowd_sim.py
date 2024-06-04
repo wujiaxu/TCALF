@@ -129,8 +129,9 @@ class CrowdPhysics:
 class CrowdSimConfig:
     _target_: str = "controllable_navi.crowd_sim.crowd_sim.CrowdWorld"
     name: str = "CrowdWorld"
+    scenario: str = "default"
     max_human_num: int = 6 
-    map_size: float = 10
+    map_size: float = 8
     with_static_obstacle: bool = True
     regen_map_every: int = 500
 
@@ -263,15 +264,15 @@ class CrowdWorld(dm_env.Environment):
         self.phase = phase
         self.config = config
         self.physics = CrowdPhysics(self)
-
+        self._scenario = cfg.scenario
         self._map_size = self.config.env.map_size #circle
         self._with_static_obstacle = cfg.with_static_obstacle
         self._regen_map_every = cfg.regen_map_every
         self._layout: dict = {"polygon":[],"vertices":[],"boundary":None}
-        map_boundary = LinearRing( ((-self._map_size/2.-1, self._map_size/2.+1), 
-                                    (self._map_size/2.+1, self._map_size/2.+1),
-                                    (self._map_size/2.+1, -self._map_size/2.-1),
-                                    (-self._map_size/2.-1,-self._map_size/2.-1)) )
+        map_boundary = LinearRing( ((-self._map_size/2., self._map_size/2.), 
+                                    (self._map_size/2., self._map_size/2.),
+                                    (self._map_size/2., -self._map_size/2.),
+                                    (-self._map_size/2.,-self._map_size/2.)) )
         #map_ = {"polygon":[],"vertices":[],"boundary":map_boundary}
         self._layout["boundary"] = map_boundary
 
@@ -428,34 +429,17 @@ class CrowdWorld(dm_env.Environment):
         # reset map
         self._layout["polygon"] = []
         self._layout["vertices"] = []
-        
-        #gen triangle
-        x = (np.random.random() - 0.5)*self._map_size
-        y = (np.random.random() - 0.5)*self._map_size
-        angle1 = (np.random.random() - 0.5)*np.pi/3. + 2*np.pi/3.
-        angle2 = (np.random.random() - 0.5)*np.pi/3. + 2*np.pi/3.
-        radius = np.random.random() * self._map_size/8.
-        triangle = genTriangle((x,y), [angle1,angle2], radius)
-        #gen rectangle
-        x = (np.random.random() - 0.5)*self._map_size
-        y = (np.random.random() - 0.5)*self._map_size
-        w = np.random.random() * self._map_size/6.
-        h = np.random.random() * self._map_size/6.
-        yaw = (np.random.random() - 0.5)*2*np.pi
-        rectangle = genRectangle(x,y,w,h,yaw)
-        #gen hex
-        x = (np.random.random() - 0.5)*self._map_size
-        y = (np.random.random() - 0.5)*self._map_size
-        radius = np.random.random() * self._map_size/6.
-        yaw = (np.random.random() - 0.5)*2*np.pi
-        hex = genHexagon(x,y,radius,yaw)
 
-        triangle = Polygon(triangle)
-        rectangle = Polygon(rectangle)
-        hex = Polygon(hex)
-
-        boundary_polygon = triangle.union(rectangle).union(hex)
-        
+        if self._scenario == "default":
+            boundary_polygon = get_default_scenario(self._map_size)
+        elif self._scenario == "hallway":
+            boundary_polygon = get_hallway_scenario(self._map_size)
+        elif self._scenario == "cross":
+            boundary_polygon = get_cross_scenario(self._map_size)
+        elif self._scenario == "doorway":
+            boundary_polygon = get_doorway_scenario(self._map_size)
+        else:
+            raise NotImplementedError
         if isinstance(boundary_polygon,MultiPolygon):
             for polygon in boundary_polygon.geoms:
                 self._layout["polygon"].append(polygon)
@@ -482,8 +466,8 @@ class CrowdWorld(dm_env.Environment):
                 # add some noise to simulate all the possible cases robot could meet with human
                 px_noise = (np.random.random() - 0.5) * human.v_pref*2
                 py_noise = (np.random.random() - 0.5) * human.v_pref*2
-                px = self._map_size * np.cos(angle)/2. + px_noise
-                py = self._map_size * np.sin(angle)/2. + py_noise
+                px = (self._map_size /2. - 1)* np.cos(angle) + px_noise
+                py = (self._map_size /2. - 1) * np.sin(angle) + py_noise
 
                 collider = Point(px, py).buffer(human.radius)
                 collide = False
@@ -533,15 +517,15 @@ class CrowdWorld(dm_env.Environment):
             # add some noise to simulate all the possible cases robot could meet with human
             px_noise = (np.random.random() - 0.5) * self.robot.v_pref
             py_noise = (np.random.random() - 0.5) * self.robot.v_pref
-            px = self._map_size * np.cos(angle)/2. + px_noise
-            py = self._map_size * np.sin(angle)/2. + py_noise
+            px = (self._map_size /2. - 1) * np.cos(angle) + px_noise
+            py = (self._map_size /2. - 1) * np.sin(angle) + py_noise
             
             angle = np.random.random() * np.pi * 2
             # add some noise to simulate all the possible cases robot could meet with human
             gx_noise = (np.random.random() - 0.5) * self.robot.v_pref
             gy_noise = (np.random.random() - 0.5) * self.robot.v_pref
-            gx = self._map_size * np.cos(angle)/2.+ gx_noise
-            gy = self._map_size * np.sin(angle)/2.+ gy_noise
+            gx = (self._map_size /2. - 1) * np.cos(angle)+ gx_noise
+            gy = (self._map_size /2. - 1) * np.sin(angle)+ gy_noise
             if (gx-px)**2+(gy-py)**2<6**2:
                 continue
             collider = Point(px, py).buffer(self.robot.radius)

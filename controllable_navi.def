@@ -8,6 +8,8 @@ From: nvidia/cuda:11.8.0-base-ubuntu20.04
         python3-pip \
         python3-venv \
         git \
+        libgl1-mesa-glx \
+        libosmesa6 \
         && apt-get clean
 
     # Create a Python virtual environment
@@ -16,7 +18,6 @@ From: nvidia/cuda:11.8.0-base-ubuntu20.04
 
     # Upgrade pip
     pip install pip==21
-    pip install wheel==0.38.0
 	
     # get pytorch-cuda
     pip install torch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2 --index-url https://download.pytorch.org/whl/cu118
@@ -31,7 +32,7 @@ From: nvidia/cuda:11.8.0-base-ubuntu20.04
     # Set up environment variables
     source /env/bin/activate
     export PATH=/env/bin:$PATH
-    export PROJECT_HOME=/opt/yourproject
+    export PROJECT_HOME=/opt/TCALF
 
 %runscript
     # This script will be executed when the container runs

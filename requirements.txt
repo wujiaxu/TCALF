@@ -7,17 +7,19 @@ hydra-submitit-launcher
 scikit-learn==1.3.1
 scipy==1.10.1
 pandas==2.0.3
-matplotlib
-moviepy
+protobuf==4.25.3
+matplotlib==3.7.5
+moviepy==1.0.3
 # mujoco==2.3.5
 # mujoco_py #mujoco==2.3.5 need to fix mujoco version below to 3.0.0
 # git+https://github.com/deepmind/dm_control.git@644b3c6844cafd611cb2dfe82bc68bb6aed97292  # past this commit, it breaks
+pyparsing==2.4.7
 dm-control==1.0.8  # let's keep it precise for now
-wandb
+wandb==0.16.5
 tensorboard
 setuptools>=65.5.1
 opencv-python
-hiplot
+hiplot==0.1.33
 termcolor
 # d4rl
 # gym>=0.21,<0.22
