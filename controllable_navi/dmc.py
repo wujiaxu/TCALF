@@ -11,8 +11,9 @@ from collections import OrderedDict, deque
 import typing as tp
 from typing import Any
 
-from dm_env import Environment
-from dm_env import StepType, specs
+#TODO use gym env or env by myself
+from controllable_navi.dm_env_light import Environment
+from controllable_navi.dm_env_light import StepType, specs
 import numpy as np
 
 

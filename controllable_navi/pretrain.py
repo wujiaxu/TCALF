@@ -37,10 +37,9 @@ import numpy as np
 import torch
 import wandb
 import omegaconf as omgcf
-# from dm_env import specs
 
 from controllable_navi import dmc
-from dm_env import specs
+from controllable_navi.dm_env_light import specs
 from controllable_navi import utils
 from controllable_navi import goals as _goals
 from controllable_navi.logger import Logger

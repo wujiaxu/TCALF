@@ -90,9 +90,12 @@ def get_default_scenario(map_size:float)->tp.Union[Polygon,MultiPolygon]:
 
     return boundary_polygon
 
-def get_hallway_scenario(map_size:float)->tp.Union[Polygon,MultiPolygon]:
+def get_hallway_scenario(map_size:float,random:bool=True)->tp.Union[Polygon,MultiPolygon]:
     # width is set to be 1/3 ~ 1/4 map_size
-    width = (np.random.random()*(1/3.-1/4.)+1/4.)*map_size
+    if random:
+        width = np.random.random()*(2.5-2)+2
+    else:
+        width = 2.2
     wall_w = (map_size-width)/2.
     center_x_1 = (width+wall_w)/2.
     center_x_2 = -center_x_1
@@ -103,9 +106,12 @@ def get_hallway_scenario(map_size:float)->tp.Union[Polygon,MultiPolygon]:
     boundary_polygon = wall_1.union(wall_2)
     return boundary_polygon
 
-def get_doorway_scenario(map_size:float)->tp.Union[Polygon,MultiPolygon]:
+def get_doorway_scenario(map_size:float,random:bool=True)->tp.Union[Polygon,MultiPolygon]:
     # width is set to be 1/2 ~ 1/3 map_size
-    width = np.random.random()*(1.2-0.8)+0.8
+    if random:
+        width = np.random.random()*(1.5-0.8)+0.8
+    else:
+        width = 1.2
     wall_w = (map_size-width)/2.
     center_x_1 = (width+wall_w)/2.
     center_x_2 = -center_x_1
@@ -116,9 +122,12 @@ def get_doorway_scenario(map_size:float)->tp.Union[Polygon,MultiPolygon]:
     boundary_polygon = wall_1.union(wall_2)
     return boundary_polygon
 
-def get_cross_scenario(map_size:float)->tp.Union[Polygon,MultiPolygon]:
+def get_cross_scenario(map_size:float,random:bool=True)->tp.Union[Polygon,MultiPolygon]:
     # width is set to be 1/2 ~ 1/3 map_size
-    width = (np.random.random()*(1/3.-1/4.)+1/4.)*map_size
+    if random:
+        width = np.random.random()*(2.5-2)+2
+    else:
+        width = 2.2
     wall_w = (map_size-width)/2.
     center = (width+wall_w)/2.
     wall_1 = genRectangle(center,center,wall_w,wall_w,0)

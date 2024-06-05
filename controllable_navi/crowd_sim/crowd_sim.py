@@ -26,8 +26,8 @@ from controllable_navi.crowd_sim.utils.info import *
 # from controllable_navi.crowd_sim.utils.utils import point_to_segment_dist
 from controllable_navi.crowd_sim.utils.obstacle import *
 
-import dm_env
-from dm_env import specs
+import controllable_navi.dm_env_light as dm_env
+from controllable_navi.dm_env_light import specs
 import enum
 from controllable_navi.dmc import ExtendedTimeStep #,TimeStep
 from hydra.core.config_store import ConfigStore
@@ -107,10 +107,17 @@ class NaviObsSpace:
     """Returns the name of the Array."""
     return self._name
 
+#TODO add static obstacle to phys
 class CrowdPhysics:
 
     def __init__(self,env):
-        self._env = env
+        self._env:CrowdWorld = env
+        # data buffer
+        # [agent_num, agent_states, static_obs]
+        # item          size        content
+        # agent_num:    1           current agent number
+        # agent_states  5XN         x,y,vx,vy,r
+        # static_obs    100         obstacle_num inf-divider (x,y)-polygon inf-divider (x,y)-polygon
     def get_state(self):
         # get robot-crowd physics
         physics = [1+len(self._env.humans)]
@@ -118,7 +125,25 @@ class CrowdPhysics:
         for human in self._env.humans:
             physics += list(human.get_observable_state().to_tuple())
         physics += (1+(1+self._env._human_num[1])*5-len(physics))*[-1]
-        return np.array(physics,dtype=np.float32)
+        static_obstacle = np.ones(100,dtype=np.float32)*np.inf
+        static_obstacle[0] = 1+len(self._env._layout)
+        i = 1
+        for obstacle in self._env._layout["vertices"]:
+            for edge in obstacle[:-1]:
+                static_obstacle[i]=edge[0]
+                static_obstacle[i+1]=edge[1]
+                i+=2
+            # static_obstacle[i] = np.inf
+            i+=1
+
+        x_b,y_b = self._env._layout["boundary"].coords.xy
+        x_b,y_b = list(x_b),list(y_b)
+        for x,y in zip(x_b,y_b):
+            static_obstacle[i]=x
+            static_obstacle[i+1]=y
+            i+=2
+        # static_obstacle[i] = np.inf
+        return np.hstack([np.array(physics,dtype=np.float32),static_obstacle])
     def render(self, height,width,camera_id):
         if self._env.render_axis is None:
             # self._env.config.env.render = False
@@ -344,7 +369,7 @@ class CrowdWorld(dm_env.Environment):
         dxy = np.array(self.robot.get_goal_position())-np.array(self.robot.get_position())
         dg = np.linalg.norm(dxy)
         if dg <self._goal_range:
-                reward = self._reward_goal
+                reward = self._reward_goal * (1-self.global_time/self._max_episode_length)
                 done = True
                 self._step_info.add(ReachGoal())
         reward += self._goal_factor * (self._last_dg-dg)
@@ -939,7 +964,7 @@ class CrowdWorld(dm_env.Environment):
         ax.add_artist(robot)
         artists.append(robot)
 
-        plt.legend([robot, goal], ['Robot', 'Goal'], fontsize=16)
+        plt.legend([robot, goal], ['Robot', 'Goal'], bbox_to_anchor=(0.85, 0.85), loc='upper left', fontsize=16)
 
         human_circles = [plt.Circle(human.get_position(), human.radius, fill=False) for human in self.humans]
 
@@ -952,6 +977,13 @@ class CrowdWorld(dm_env.Environment):
             polygon = patches.Polygon(obstacle[:-1], closed=True, edgecolor='b', facecolor='none')
             ax.add_patch(polygon)
             artists.append(polygon)
+
+        x_b,y_b = self._layout["boundary"].coords.xy
+        x_b,y_b = list(x_b),list(y_b)
+        boundary = [(x_b[i],y_b[i]) for i in range(len(x_b))]
+        polygon = patches.Polygon(boundary[:-1], closed=True, edgecolor='b', facecolor='none')
+        ax.add_patch(polygon)
+        artists.append(polygon)
         # for agent in self.humans + [self.robot]:
         #     x,y = agent.collider.exterior.xy
         #     ax.plot(x, y)

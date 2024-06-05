@@ -197,6 +197,7 @@ class Logger:
     def log_distribution(self, step: int, replay_buffer:ReplayBuffer)->None:
         if self._sw is not None:
             fig = replay_buffer.plot_traj_dist(5000)
+            #TODO add static obstacle to phys
             self._sw.add_image("traj_dist",fig,step, dataformats='HWC')
         return
     

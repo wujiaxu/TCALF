@@ -13,12 +13,13 @@ from pathlib import Path
 import numpy as np
 from sympy import NDimArray
 import torch
-from dm_env import specs, TimeStep
+from controllable_navi.dm_env_light import specs, TimeStep
 from tqdm import tqdm
 from controllable_navi.replay_buffer import EpisodeBatch
 from controllable_navi.dmc import ExtendedGoalTimeStep
 from controllable_navi.crowd_sim.utils.info import *
 import matplotlib.pyplot as plt
+from matplotlib import patches
 from scipy.stats import gaussian_kde
 
 Specs = tp.Sequence[specs.Array]
@@ -124,16 +125,6 @@ class ReplayBuffer:
         # if not time_step.last():
         #     self._current_episode["done"].append(np.array([1],dtype=dtype))
         if time_step.last():
-            # self._current_episode["done"].append(np.array([0],dtype=dtype))
-            # TODO decide whether push the episode to memory buffer
-            # if (not time_step.info.contain(ReachGoal())) and (not time_step.info.contain(Collision())):
-            #     self._current_episode = collections.defaultdict(list)
-            #     # not to add if the agent not reach goal or collide
-            #     # self._collected_episodes += 1
-            #     # self._idx = (self._idx + 1) % self._max_episodes
-            #     # self._full = self._full or self._idx == 0
-            #     self._episodes_selection_probability = None
-            #     return
             if not hasattr(self, "_batch_names"):
                 self._batch_names = set(field.name for field in dataclasses.fields(ExtendedGoalTimeStep))
             for name, value_list in self._current_episode.items():
@@ -309,7 +300,6 @@ class ReplayBuffer:
     
     def plot_traj_dist(self,batch_size:int)->np.ndarray: 
         
-        figure = plt.figure(figsize=(5,5))
         if self._is_fixed_episode_length:
             ep_idx = np.random.randint(0, len(self), size=batch_size)
         else:
@@ -324,9 +314,30 @@ class ReplayBuffer:
         step_idx = np.random.randint(0, eps_lengths) + 1
 
         phy = self._storage['physics'][ep_idx, step_idx]
+        figure, ax = plt.subplots(figsize=(5,5))
+
         
         robot_x = phy[:,1]
         robot_y = phy[:,2]
+        agent_num = phy[0,0]
+        index = int(1+agent_num*5)
+        obs_num = phy[0,index]
+        index+=1
+        obs = []
+        artists = []
+        while obs_num>0:
+            x = phy[0,index]
+            y = phy[0,index+1]
+            obs.append((x,y))
+            index+=2
+            if phy[0,index]==np.inf:
+                index+=1
+                obs_num-=1
+                polygon = patches.Polygon(obs, closed=True, edgecolor='b', facecolor='none')
+                ax.add_patch(polygon)
+                artists.append(polygon)
+                obs = []
+        
         xy = np.vstack([robot_x, robot_y])
         try:
             z = gaussian_kde(xy)(xy)
@@ -334,14 +345,16 @@ class ReplayBuffer:
             # Step 4: Sort the points by density, so that the densest points are plotted on top
             idx = z.argsort()
             x, y, z = robot_x[idx], robot_y[idx], z[idx]
-            plt.scatter(x,y,c=z,s=30,edgecolor='none', cmap='viridis',alpha=0.5)
+            ax.scatter(x,y,c=z,s=30,edgecolor='none', cmap='viridis',alpha=0.5)
         except:
-            plt.scatter(robot_x,robot_y,color='b',edgecolor='none',alpha=0.1)
+            ax.scatter(robot_x,robot_y,color='b',edgecolor='none',alpha=0.1)
         fig = plt.gcf()
         fig.canvas.draw()
         data = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
         w, h = fig.canvas.get_width_height()
         img = data.reshape((h, w, 3))
+        for item in artists:
+            item.remove()
         plt.close(figure)
         return img
 

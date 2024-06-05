@@ -15,7 +15,7 @@ import dataclasses
 import numpy as np
 import torch
 from torch.utils.data import IterableDataset
-from dm_env import specs, TimeStep
+from controllable_navi.dm_env_light import specs, TimeStep
 
 
 EpisodeTuple = tp.Tuple[np.ndarray, ...]

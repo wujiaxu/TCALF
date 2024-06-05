@@ -6,7 +6,7 @@ for fp in [base, base / "controllable_navi"]:
     assert fp.exists()
     if str(fp) not in sys.path:
         sys.path.append(str(fp))
-import dm_env
+from  controllable_navi.dm_env_light import StepType
 from controllable_navi.crowd_sim.crowd_sim import build_crowdworld_task
 import numpy as np
 from controllable_navi.video import VideoRecorder
@@ -21,7 +21,7 @@ n_episodes = 5
 for i in range(n_episodes):
     step_ex = crowd_sim.reset()
     recorder.init(crowd_sim)
-    while not step_ex.step_type == dm_env.StepType.LAST:
+    while not step_ex.step_type == StepType.LAST:
         step_ex = crowd_sim.step(np.array([0.7,-0.5]))
         # print(step_ex.observation.dtype) make sure the obs is float32 matched to torch model
         recorder.record(crowd_sim)

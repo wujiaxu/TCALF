@@ -18,7 +18,6 @@ from torch import nn
 import torch.nn.functional as F
 from hydra.core.config_store import ConfigStore
 import omegaconf
-from dm_env import specs
 
 from controllable_navi import utils
 # from controllable_navi import replay_buffer as rb
