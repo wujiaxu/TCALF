@@ -5,7 +5,7 @@
 
 import typing as tp
 from pathlib import Path
-import cv2
+# import cv2
 import imageio
 import numpy as np
 import wandb
@@ -83,30 +83,30 @@ class TrainVideoRecorder:
         self.camera_id = camera_id
         self.use_wandb = use_wandb
 
-    def init(self, obs, enabled=True) -> None:
-        self.frames = []
-        self.enabled = self.save_dir is not None and enabled
-        self.record(obs)
+    # def init(self, obs, enabled=True) -> None:
+    #     self.frames = []
+    #     self.enabled = self.save_dir is not None and enabled
+    #     self.record(obs)
 
-    def record(self, obs) -> None:
-        if self.enabled:
-            frame = cv2.resize(obs[-3:].transpose(1, 2, 0),
-                               dsize=(self.render_size, self.render_size),
-                               interpolation=cv2.INTER_CUBIC)
-            self.frames.append(frame)
+    # def record(self, obs) -> None:
+    #     if self.enabled:
+    #         frame = cv2.resize(obs[-3:].transpose(1, 2, 0),
+    #                            dsize=(self.render_size, self.render_size),
+    #                            interpolation=cv2.INTER_CUBIC)
+    #         self.frames.append(frame)
 
-    def log_to_wandb(self) -> None:
-        frames = np.transpose(np.array(self.frames), (0, 3, 1, 2))
-        fps, skip = 6, 8
-        wandb.log({
-            'train/video':
-            wandb.Video(frames[::skip, :, ::2, ::2], fps=fps, format="gif")
-        })
+    # def log_to_wandb(self) -> None:
+    #     frames = np.transpose(np.array(self.frames), (0, 3, 1, 2))
+    #     fps, skip = 6, 8
+    #     wandb.log({
+    #         'train/video':
+    #         wandb.Video(frames[::skip, :, ::2, ::2], fps=fps, format="gif")
+    #     })
 
-    def save(self, file_name) -> None:
-        if self.enabled:
-            if self.use_wandb:
-                self.log_to_wandb()
-            assert self.save_dir is not None
-            path = self.save_dir / file_name
-            imageio.mimsave(str(path), self.frames, fps=self.fps)  # type: ignore
+    # def save(self, file_name) -> None:
+    #     if self.enabled:
+    #         if self.use_wandb:
+    #             self.log_to_wandb()
+    #         assert self.save_dir is not None
+    #         path = self.save_dir / file_name
+    #         imageio.mimsave(str(path), self.frames, fps=self.fps)  # type: ignore

@@ -44,7 +44,7 @@ from controllable_navi import utils
 from controllable_navi import goals as _goals
 from controllable_navi.logger import Logger
 from controllable_navi.in_memory_replay_buffer import ReplayBuffer
-from controllable_navi.video import TrainVideoRecorder, VideoRecorder
+from controllable_navi.video import VideoRecorder
 from controllable_navi import agent as agents
 from controllable_navi import crowd_sim as crowd_sims
 from controllable_navi.crowd_sim.utils.info import *
@@ -495,8 +495,8 @@ class BaseWorkspace(tp.Generic[C]):
 class Workspace(BaseWorkspace[PretrainConfig]):
     def __init__(self, cfg: PretrainConfig) -> None:
         super().__init__(cfg)
-        self.train_video_recorder = TrainVideoRecorder(self.work_dir if cfg.save_train_video else None,
-                                                       camera_id=self.video_recorder.camera_id, use_wandb=self.cfg.use_wandb)
+        # self.train_video_recorder = TrainVideoRecorder(self.work_dir if cfg.save_train_video else None,
+        #                                                camera_id=self.video_recorder.camera_id, use_wandb=self.cfg.use_wandb)
         if not self._checkpoint_filepath.exists():  # don't relay if there is a checkpoint
             if cfg.load_replay_buffer is not None:
                 # if self.cfg.task.split('_')[0] == "d4rl":
@@ -538,7 +538,7 @@ class Workspace(BaseWorkspace[PretrainConfig]):
             obs = time_step.observation
         meta = self._init_meta()
         self.replay_loader.add(time_step, meta)
-        self.train_video_recorder.init(time_step.observation)
+        # self.train_video_recorder.init(time_step.observation)
         metrics = None
         physics_agg = dmc.PhysicsAggregator()
 
@@ -551,7 +551,7 @@ class Workspace(BaseWorkspace[PretrainConfig]):
                 #     print(task_info)
                 #     raise ValueError
                 self.global_episode += 1
-                self.train_video_recorder.save(f'{self.global_frame}.mp4')
+                # self.train_video_recorder.save(f'{self.global_frame}.mp4')
                 # wait until all the metrics schema is populated
                 if metrics is not None:
                     # log stats
@@ -585,7 +585,7 @@ class Workspace(BaseWorkspace[PretrainConfig]):
                 time_step = self.train_env.reset()
                 meta = self._init_meta()
                 self.replay_loader.add(time_step, meta)
-                self.train_video_recorder.init(time_step.observation)
+                # self.train_video_recorder.init(time_step.observation)
                 
                 episode_step = 0
                 episode_reward = 0.0
@@ -634,7 +634,7 @@ class Workspace(BaseWorkspace[PretrainConfig]):
             physics_agg.add(self.train_env)
             episode_reward += self.cfg.discount**episode_step*time_step.reward #NEW: consider discount
             self.replay_loader.add(time_step, meta)
-            self.train_video_recorder.record(time_step.observation)
+            # self.train_video_recorder.record(time_step.observation)
             if isinstance(self.agent, agents.FBDDPGAgent):
                 z_correl += self.agent.compute_z_correl(time_step, meta)
             episode_step += 1
