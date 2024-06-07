@@ -46,7 +46,7 @@ class GD_APSAgentConfig(DDPGAgentConfig):
     init_constraint_value: float = 1.25
     max_constraint_value: float = 1.8
     dynamic_contrain_step: int = 2000000
-    constraint_on: str = "r_intr"
+    constraint_on: str = "r_entropy"
     lagrangian_k_p: float = 0.0003
     lagrangian_k_i: float = 0.0003
     lagrangian_k_d: float = 0.0003
@@ -326,6 +326,19 @@ class APSAgent(DDPGAgent):
                 metrics['intr_reward'] = intr_reward.mean().item()
                 metrics['intr_ent_reward'] = intr_ent_reward.mean().item()
                 metrics['intr_sf_reward'] = intr_sf_reward.mean().item()
+
+            # update balancing_factor
+            if self.cfg.use_constraint:
+                self.update_constraint_value(step)
+            if step % self.update_lagrange_every_steps ==0 and self.cfg.use_constraint:
+                cost_limit = -self.constrain_value
+                cost = -intr_ent_reward.mean().item() #-intr_sf_reward.mean().cpu().item() or Q value
+                self.lagrange.update_lagrange_multiplier(cost,cost_limit)
+                self.balancing_factor = self.lagrange.lagrangian_multiplier.to(self.cfg.device)
+                if self.use_tb or self.use_wandb:
+                    metrics['lagrange_multiplier'] = self.lagrange.lagrangian_multiplier
+                    metrics['cost'] = cost
+                    metrics['cost_limit'] = cost_limit
             
             reward = intr_reward
 
@@ -492,19 +505,6 @@ class APSAgent(DDPGAgent):
             metrics['critic_q1'] = Q1.mean().item()
             metrics['critic_q2'] = Q2.mean().item()
             metrics['critic_loss'] = critic_loss.item()
-
-        # update balancing_factor
-        if self.cfg.use_constraint:
-            self.update_constraint_value(step)
-        if step % self.update_lagrange_every_steps ==0 and self.cfg.use_constraint:
-            cost_limit = -self.constrain_value
-            cost = -reward.mean().item() #-intr_sf_reward.mean().cpu().item() or Q value
-            self.lagrange.update_lagrange_multiplier(cost,cost_limit)
-            self.balancing_factor = self.lagrange.lagrangian_multiplier.to(self.cfg.device)
-            if self.use_tb or self.use_wandb:
-                metrics['lagrange_multiplier'] = self.lagrange.lagrangian_multiplier
-                metrics['cost'] = cost
-                metrics['cost_limit'] = cost_limit
 
         # optimize critic
         self.critic_opt.zero_grad(set_to_none=True)

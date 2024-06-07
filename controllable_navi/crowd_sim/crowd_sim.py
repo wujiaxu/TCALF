@@ -824,10 +824,10 @@ class CrowdWorld(dm_env.Environment):
         
 
         if self._observation_type == ObservationType.RAW_SCAN:
-            return np.hstack([self._current_scan,
+            return np.hstack([np.clip(self._current_scan,0.,self._local_map_size/2.),
                               np.array([dg,hf,vx,vy,self.robot.radius],dtype=np.float32)]) 
         elif self._observation_type == ObservationType.TIME_AWARE_RAW_SCAN:
-            return np.hstack([self._current_scan,
+            return np.hstack([np.clip(self._current_scan,0.,self._local_map_size/2.),
                               np.array([self._num_episode_steps/self._max_episode_length,
                                         np.log(self._max_episode_length),
                                         dg, hf,vx,vy,self.robot.radius],dtype=np.float32)]) 
