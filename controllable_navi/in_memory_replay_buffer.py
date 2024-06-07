@@ -11,7 +11,7 @@ import collections
 from pathlib import Path
 
 import numpy as np
-from sympy import NDimArray
+# from sympy import NDimArray
 import torch
 from controllable_navi.dm_env_light import specs, TimeStep
 from tqdm import tqdm
