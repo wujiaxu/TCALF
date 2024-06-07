@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections import deque
 
-from numpy import dtype
+# from numpy import dtype
 import torch
 
 class Lagrange:

@@ -3,20 +3,17 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from turtle import forward
 import typing as tp
 import dataclasses
 from typing import Any, Tuple
 from collections import OrderedDict
 
-from IPython import embed_kernel
 import numpy as np
 import torch
 from torch import nn
 import torch.nn.functional as F
 from hydra.core.config_store import ConfigStore
 import omegaconf
-from traitlets import Dict
 
 from controllable_navi.dmc import TimeStep
 from controllable_navi.in_memory_replay_buffer import ReplayBuffer
@@ -24,8 +21,6 @@ from controllable_navi import utils
 from .fb_modules import mlp
 from controllable_navi.agent.encoders import MultiModalEncoder,EncoderConfig
 from controllable_navi.agent.sequence_encoders import SequenceEncoder,SequenceEncoderConfig
-from controllable_navi.crowd_sim.crowd_sim import NaviObsSpace
-# MetaDict = tp.Mapping[str, tp.Union[np.ndarray, torch.Tensor]]
 MetaDict = tp.Mapping[str, np.ndarray]
 
 
