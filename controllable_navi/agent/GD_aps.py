@@ -226,7 +226,8 @@ class APSAgent(DDPGAgent):
         if new_value:
             self.constrain_value = new_value
         else:
-            self.constrain_value = self.cfg.init_constraint_value\
+            if step < self.cfg.dynamic_contrain_step:
+                self.constrain_value = self.cfg.init_constraint_value\
                                     +step*(self.cfg.max_constraint_value-self.cfg.init_constraint_value)/self.cfg.dynamic_contrain_step #TODO 
 
     # pylint: disable=unused-argument
