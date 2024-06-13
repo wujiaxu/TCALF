@@ -2,18 +2,15 @@
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
-
-import pdb  # pylint: disable=unused-import
-import sys
+import pdb
 import unittest
 import dataclasses
-from collections import OrderedDict, deque
 import typing as tp
-from typing import Any
 
 #TODO use gym env or env by myself
 from controllable_navi.dm_env_light import Environment
 from controllable_navi.dm_env_light import StepType, specs
+from controllable_navi.dm_env_light import TimeStep as TS
 import numpy as np
 
 
@@ -57,6 +54,31 @@ class TimeStep:
         for name, val in kwargs.items():
             setattr(self, name, val)
         return self
+    
+# @dataclasses.dataclass
+# class MultiAgentTimeStep:
+#     step_type: StepType
+#     rewards: list
+#     discounts: list
+#     observation: np.ndarray
+#     physics: np.ndarray = dataclasses.field(default=np.ndarray([]), init=False)
+
+#     def first(self) -> bool:
+#         return self.step_type == StepType.FIRST  # type: ignore
+
+#     def mid(self) -> bool:
+#         return self.step_type == StepType.MID  # type: ignore
+
+#     def last(self) -> bool:
+#         return self.step_type == StepType.LAST  # type: ignore
+
+#     def __getitem__(self, attr: str) -> tp.Any:
+#         return getattr(self, attr)
+
+#     def _replace(self: S, **kwargs: tp.Any) -> S:
+#         for name, val in kwargs.items():
+#             setattr(self, name, val)
+#         return self
 
 
 @dataclasses.dataclass
@@ -73,25 +95,62 @@ class ExtendedGoalTimeStep(GoalTimeStep):
 class ExtendedTimeStep(TimeStep):
     action: tp.Any
 
+# @dataclasses.dataclass
+# class ExtendedMultiAgentTimeStep(MultiAgentTimeStep):
+#     actions: tp.Any
+
 
 class EnvWrapper:
     def __init__(self, env: Env) -> None:
         self._env = env
 
-    def _augment_time_step(self, time_step: TimeStep, action: tp.Optional[np.ndarray] = None) -> TimeStep:
-        if not isinstance(time_step, TimeStep):
-            # dm_env time step is a named tuple
-            time_step = TimeStep(**time_step._asdict())
-        if self.physics is not None:
-            return time_step._replace(physics=self.physics.get_state())
+    # def _augment_time_step(self, time_step:TimeStep, action: tp.Optional[np.ndarray] = None) -> TimeStep:
+    #     if not isinstance(time_step, TimeStep):
+    #         # dm_env time step is a named tuple
+    #         time_step = TimeStep(**time_step._asdict())
+    #     if self.physics is not None:
+    #         return time_step._replace(physics=self.physics.get_state())
+    #     else:
+    #         return time_step
+        
+    def _augment_time_step(self, time_step: tp.Union[TS,tp.List[TS]], action: tp.Optional[np.ndarray] = None) -> tp.Union[TimeStep,tp.List[TimeStep]]:
+        
+        if isinstance(time_step, list):
+            if self.physics is not None:
+                time_step_with_phy = []
+                for id, robot_step in enumerate(time_step):
+                    if not isinstance(robot_step, TimeStep):
+            #         # dm_env time step is a named tuple
+                        robot_step = TimeStep(**robot_step._asdict())
+                    time_step_with_phy.append(robot_step._replace(physics=self.physics.get_state(id)))
+                # print(time_step_with_phy)
+                return time_step_with_phy
+            else:
+                time_steps = []
+                for robot_step in time_step:
+                    if not isinstance(robot_step, TimeStep):
+            #         # dm_env time step is a named tuple
+                        robot_step = TimeStep(**robot_step._asdict())
+                    time_steps.append(robot_step)
+                return time_steps
         else:
-            return time_step
+        # elif isinstance(time_step, TS):
+            if not isinstance(time_step, TimeStep):
+    #         # dm_env time step is a named tuple
+                time_step = TimeStep(**time_step._asdict())
+            
+            if self.physics is not None:
+                return time_step._replace(physics=self.physics.get_state())
+            else:
+                return time_step
+        # else:
+        #     raise NotImplementedError
 
-    def reset(self) -> TimeStep:
-        time_step = self._env.reset()
+    def reset(self,test_case=None) -> tp.Union[TimeStep,tp.List[TimeStep]]:
+        time_step = self._env.reset(test_case)
         return self._augment_time_step(time_step)
 
-    def step(self, action: np.ndarray) -> TimeStep:
+    def step(self, action: np.ndarray) -> tp.Union[TimeStep,tp.List[TimeStep]]:
         time_step = self._env.step(action)
         return self._augment_time_step(time_step, action)
 

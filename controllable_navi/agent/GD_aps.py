@@ -59,39 +59,50 @@ class GD_APSAgentConfig(DDPGAgentConfig):
 cs = ConfigStore.instance()
 cs.store(group="agent", name="gd_aps", node=GD_APSAgentConfig)
 
-class IDP(nn.Module):
+class ICM(nn.Module):
     # inverse dynamic presentation for embedding obs to controllable state
-    def __init__(self, obs_dim, action_dim, hidden_dim) -> None:
+    """
+    Same as ICM, with a trunk to save memory for KNN
+    """
+    def __init__(self, obs_dim, action_dim, hidden_dim,icm_rep_dim) -> None:
         super().__init__()
 
-        self.embedding_net = nn.Sequential(
-            nn.Linear(obs_dim, hidden_dim), nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim))
+        self.trunk = nn.Sequential(nn.Linear(obs_dim, icm_rep_dim),
+                                   nn.LayerNorm(icm_rep_dim), nn.Tanh())
 
-        self.backward_net = nn.Sequential(nn.Linear(2 * hidden_dim, hidden_dim),
-                                          nn.ReLU(),
-                                          nn.Linear(hidden_dim, action_dim),
-                                          nn.Tanh())
+        self.forward_net = nn.Sequential(
+            nn.Linear(icm_rep_dim + action_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, icm_rep_dim))
+
+        self.backward_net = nn.Sequential(
+            nn.Linear(2 * icm_rep_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, action_dim), nn.Tanh())
 
         self.apply(utils.weight_init)
 
-    def forward(self, obs, action, next_obs) -> Tuple[Any, Any, Any]:
+    def forward(self, obs, action, next_obs) -> Tuple[Any, Any]:
         assert obs.shape[0] == next_obs.shape[0]
         assert obs.shape[0] == action.shape[0]
 
-        f_obs = self.embedding_net(obs)
-        f_next_obs = self.embedding_net(next_obs)
-        action_hat = self.backward_net(torch.cat([f_obs, f_next_obs], dim=-1))
+        obs = self.trunk(obs)
+        next_obs = self.trunk(next_obs)
+        next_obs_hat = self.forward_net(torch.cat([obs, action], dim=-1))
+        action_hat = self.backward_net(torch.cat([obs, next_obs], dim=-1))
 
+        forward_error = torch.norm(next_obs - next_obs_hat,
+                                   dim=-1,
+                                   p=2,
+                                   keepdim=True)
         backward_error = torch.norm(action - action_hat,
                                     dim=-1,
                                     p=2,
                                     keepdim=True)
 
-        return f_obs, f_next_obs, backward_error
-    
-    def embed(self,obs):
-        return self.embedding_net(obs)
+        return forward_error, backward_error
+
+    def get_rep(self, obs, action) -> Any:
+        rep = self.trunk(obs)
+        return rep
     
 class APSAgent(DDPGAgent):
     def __init__(self, **kwargs: tp.Any) -> None:
@@ -107,23 +118,24 @@ class APSAgent(DDPGAgent):
             self.sse_dim = self.cfg.sse_dim
             if self.cfg.self_supervised_encoder=="IDP":
                 # inverse dynamic feature embedding
-                self.sse = IDP(self.obs_dim - self.sf_dim,self.action_dim,self.sse_dim).to(kwargs['device'])
+                self.sse = ICM(self.obs_dim - self.sf_dim,self.action_dim,self.hidden_dim,self.sse_dim).to(kwargs['device'])
                 self.sse_opt = torch.optim.Adam(self.sse.parameters(), lr=self.lr)
             else:
                 raise NotImplementedError
         else:
             self.sse_dim = self.obs_dim - self.sf_dim
             self.sse = nn.Identity()
+            self.sse_opt = None
 
-        self.actor = Actor('states', self.sse_dim + self.sf_dim, self.action_dim,
+        self.actor = Actor('states', self.obs_dim, self.action_dim,
                            cfg.feature_dim, cfg.hidden_dim).to(cfg.device)
         self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=cfg.lr)
         # overwrite critic with critic sf
         # # input of critic sf is idp feature with dim=cfg.hidden_dim
-        self.critic = CriticSF('states', self.sse_dim + self.sf_dim, self.action_dim,
+        self.critic = CriticSF('states', self.obs_dim, self.action_dim,
                                self.feature_dim, self.hidden_dim,
                                self.sf_dim).to(self.device)
-        self.critic_target = CriticSF('states', self.sse_dim + self.sf_dim,
+        self.critic_target = CriticSF('states', self.obs_dim,
                                       self.action_dim, self.feature_dim,
                                       self.hidden_dim,
                                       self.sf_dim).to(self.device)
@@ -131,9 +143,9 @@ class APSAgent(DDPGAgent):
         self.critic_opt = torch.optim.Adam(self.critic.parameters(),
                                            lr=self.lr)
         
-        self.critic_goal = Critic('states', self.sse_dim, self.action_dim,
+        self.critic_goal = Critic('states', self.obs_dim - self.sf_dim, self.action_dim,
                                self.feature_dim, self.hidden_dim).to(self.device)
-        self.critic_goal_target = Critic('states', self.sse_dim,
+        self.critic_goal_target = Critic('states', self.obs_dim - self.sf_dim,
                                       self.action_dim, self.feature_dim,
                                       self.hidden_dim).to(self.device)
         self.critic_goal_target.load_state_dict(self.critic_goal.state_dict())
@@ -142,7 +154,7 @@ class APSAgent(DDPGAgent):
 
         # aps is denoted as phi in the original paper
         # input of aps is idp feature with dim=cfg.hidden_dim
-        self.aps = APS(self.sse_dim*2+self.action_dim, self.sf_dim,
+        self.aps = APS((self.obs_dim - self.sf_dim)*2+self.action_dim, self.sf_dim,
                        kwargs['hidden_dim']).to(kwargs['device'])
         self.aps_opt = torch.optim.Adam(self.aps.parameters(), lr=self.lr)
         
@@ -269,9 +281,9 @@ class APSAgent(DDPGAgent):
         
         # Encoding
         if self.cfg.use_self_supervised_encoder:
-            f_next_obs = self.sse.embed(next_obs)
+            f_next_obs = self.sse.get_rep(obs, action)
         else:
-            f_next_obs = next_obs #~5.28 next_obs, but original paper used rep
+            f_next_obs = rep#next_obs~6.10 #~5.28 next_obs, but original paper used rep
         reward = self.pbe(f_next_obs) #not encoded? hahahaha
         intr_ent_reward = reward.reshape(-1, 1)
 
@@ -468,10 +480,10 @@ class APSAgent(DDPGAgent):
     def update_sse(self,obs,action,next_obs):
         metrics: tp.Dict[str, float] = {}
 
-        _,_,sse_loss = self.sse(obs,action,next_obs)
-        loss = sse_loss.mean()
+        forward_error, backward_error = self.sse(obs,action,next_obs)
+        loss = forward_error.mean() + backward_error.mean()
 
-        self.sse_opt.zero_grad(set_to_none=True)
+        self.sse_opt.zero_grad()
         loss.backward()
         self.sse_opt.step()
 

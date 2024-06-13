@@ -9,7 +9,7 @@ import typing as tp
 from pathlib import Path
 import datetime
 from collections import defaultdict
-
+from PIL import Image
 import torch
 import wandb
 from termcolor import colored
@@ -148,7 +148,8 @@ class MetersGroup:
 class Logger:
     def __init__(self, log_dir: Path, use_tb: bool, use_wandb: bool, use_hiplog: bool) -> None:
         self._log_dir = log_dir
-
+        self.traj_dist_log = self._log_dir/'traj_dist'
+        self.traj_dist_log.mkdir(exist_ok=True)
         self._train_mg = MetersGroup(log_dir / 'train.csv',
                                      formating=COMMON_TRAIN_FORMAT,
                                      use_wandb=use_wandb)
@@ -194,11 +195,16 @@ class Logger:
     def log_and_dump_ctx(self, step: int, ty: str) -> "LogAndDumpCtx":
         return LogAndDumpCtx(self, step, ty)
     
-    def log_distribution(self, step: int, replay_buffer:ReplayBuffer)->None:
+    def log_distribution(self, step: int, replay_buffer:ReplayBuffer, save_to_file:bool=True)->None:
+        if self._sw is None and save_to_file==False:
+            return
+        fig = replay_buffer.plot_traj_dist(5000)
         if self._sw is not None:
-            fig = replay_buffer.plot_traj_dist(5000)
             #TODO add static obstacle to phys
             self._sw.add_image("traj_dist",fig,step, dataformats='HWC')
+        if save_to_file:
+            pil_image = Image.fromarray(fig)
+            pil_image.save(self.traj_dist_log/'{}.png'.format(step))
         return
     
     def log_model_weights(self, model_name:str, step: int, model: torch.nn.Module)->None:

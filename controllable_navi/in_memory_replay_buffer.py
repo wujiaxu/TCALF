@@ -79,7 +79,10 @@ class ReplayBuffer:
         assert 0 <= future <= 1
         self._future = future
         self._current_episode: tp.Dict[str, tp.List[np.ndarray]] = collections.defaultdict(list)
-        self._idx = 0
+        self._current_episode_multi: tp.List[tp.Dict[str, tp.List[np.ndarray]]] \
+            = [collections.defaultdict(list) for _ in range(10)] #TODO
+        self.robot_traj_recorded = [False for _ in range(10)]
+        self._idx = 0 
         self._full = False
         self._num_transitions = 0
         self._storage: tp.Dict[str, np.ndarray] = collections.defaultdict()
@@ -152,6 +155,57 @@ class ReplayBuffer:
             self._full = self._full or self._idx == 0
             self._episodes_selection_probability = None
 
+    
+    def add_multi(self, time_step_multi: tp.List[TimeStep], metas: tp.List[tp.Mapping[str, np.ndarray]]) -> None:
+        # TODO discuss instantiate buffer for each agent may be better!!!
+        dtype = np.float32
+        for id, (time_step, meta) in enumerate(zip(time_step_multi,metas)):
+            if self.robot_traj_recorded[id]:continue
+            for key, value in meta.items():
+                self._current_episode_multi[id][key].append(value)
+            for field in dataclasses.fields(time_step):
+                value = time_step[field.name]
+                if np.isscalar(value):
+                    value = np.full((1,), value, dtype=dtype)
+                if isinstance(value, np.ndarray):
+                    self._current_episode_multi[id][field.name].append(np.array(value, dtype=dtype))
+            if time_step.last():
+                self.robot_traj_recorded[id] = True
+                if not hasattr(self, "_batch_names"):
+                    self._batch_names = set(field.name for field in dataclasses.fields(ExtendedGoalTimeStep))
+                for name, value_list in self._current_episode_multi[id].items():
+                    values = np.array(value_list, dtype)
+                    if name not in self._storage:
+                        # first iteration, the buffer is created with appropriate size
+                        _shape = values.shape
+                        if self._max_episode_length is not None:
+                            _shape = (self._max_episode_length,) + _shape[1:]
+                        self._storage[name] = np.zeros((self._max_episodes,) + _shape, dtype=dtype)
+                    #TODO ValueError: could not broadcast input array from shape (201,10) into shape (67,10) <- solved
+                    # the bug is caused by non fixed length of episode, so need to def self._max_episode_length to max length of crowdsim +1 
+                    try:
+                        self._storage[name][self._idx][:len(values)] = values
+                    except Exception as e:
+                        print(e)
+                        print(name,len(values),values,time_step.observation[-7:])
+                        raise RuntimeError
+
+                    # TODO add G on episode end
+                    if name == "reward":
+                        self._episodes_return[self._idx] = sum([r*self._discount**i for i,r in enumerate(values.flatten().tolist())])
+                
+                self._episodes_length[self._idx] = len(self._current_episode_multi[id]['discount']) - 1  # compensate for the dummy transition at the beginning
+                if self._episodes_length[self._idx] != self._episodes_length[self._idx - 1] and self._episodes_length[self._idx - 1] != 0:
+                    self._is_fixed_episode_length = False
+                self._current_episode_multi[id] = collections.defaultdict(list)
+                self._collected_episodes += 1
+                self._idx = (self._idx + 1) % self._max_episodes
+                self._full = self._full or self._idx == 0
+                self._episodes_selection_probability = None
+        if all([time_step.last() for time_step in time_step_multi]):
+            self.robot_traj_recorded = [False for _ in range(10)] #TODO 10
+            # print("episode_end")
+    
     @property
     def avg_episode_length(self) -> int:
         return round(self._episodes_length[:len(self)].mean())
@@ -215,14 +269,6 @@ class ReplayBuffer:
         else:
             reward = self._storage['reward'][ep_idx, step_idx]
         discount = self._discount * self._storage['discount'][ep_idx, step_idx]
-
-        # import matplotlib.pyplot as plt
-        # plt.scatter(phy[:,1],phy[:,2],alpha=0.1)
-        # plt.hist(obs[:,-6],bins=100)
-        # plt.hist(action[:,1],bins=10)
-        # plt.hist(reward,bins=10)
-        # plt.savefig("dist_xy.png")
-        # plt.close()
 
         goal: tp.Optional[np.ndarray] = None
         next_goal: tp.Optional[np.ndarray] = None
@@ -319,18 +365,17 @@ class ReplayBuffer:
         
         robot_x = phy[:,1]
         robot_y = phy[:,2]
-        agent_num = phy[0,0]
-        index = int(1+agent_num*5)
-        obs_num = phy[0,index]
-        index+=1
+        obs_data = phy[0,-100:]
+        obs_num = obs_data[0]
+        index=1
         obs = []
         artists = []
         while obs_num>0:
-            x = phy[0,index]
-            y = phy[0,index+1]
+            x = obs_data[index]
+            y = obs_data[index+1]
             obs.append((x,y))
             index+=2
-            if phy[0,index]==np.inf:
+            if obs_data[index]==np.inf:
                 index+=1
                 obs_num-=1
                 polygon = patches.Polygon(obs, closed=True, edgecolor='b', facecolor='none')

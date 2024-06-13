@@ -18,7 +18,7 @@
 import abc
 import enum
 from typing import Any, NamedTuple
-
+import typing as tp
 from controllable_navi.dm_env_light import specs
 
 
@@ -90,7 +90,7 @@ class Environment(metaclass=abc.ABCMeta):
   """
 
   @abc.abstractmethod
-  def reset(self) -> TimeStep:
+  def reset(self,test_case:tp.Optional[int]=None) -> tp.Union[TimeStep,tp.List[TimeStep]]:
     """Starts a new sequence and returns the first `TimeStep` of this sequence.
 
     Returns:
@@ -105,7 +105,7 @@ class Environment(metaclass=abc.ABCMeta):
     """
 
   @abc.abstractmethod
-  def step(self, action) -> TimeStep:
+  def step(self, action) -> tp.Union[TimeStep,tp.List[TimeStep]]:
     """Updates the environment according to the action and returns a `TimeStep`.
 
     If the environment returned a `TimeStep` with `StepType.LAST` at the
