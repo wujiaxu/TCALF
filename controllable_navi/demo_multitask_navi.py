@@ -55,7 +55,7 @@ import matplotlib.pyplot as plt
 
 @dataclasses.dataclass
 class TestConfig():
-    model_dir:str = "2024.05.26/062410_gd_aps_crowdnavi_PointGoalNavi_online"
+    model_dir:str = "2024.06.14/221836_gd_aps_crowdnavi_PointGoalNavi_online"
     num_eval_episodes:int=10
     task:str = 'PassLeftSide'
 
@@ -65,10 +65,11 @@ def load_workspace(model_dir: str):
     model_base=Path('/home/dl/wu_ws/TCALF/controllable_navi/exp_local/')
     checkpoint = model_base/Path(model_dir)/"models/latest.pt"
     config_file = model_base/Path(model_dir)/".hydra/config.yaml"
-    hp = runner.HydraEntryPoint(base / "controllable_navi/pretrain.py")
+    hp = runner.HydraEntryPoint(base / "controllable_navi/pretrain_self_play.py")
     cfg = OmegaConf.load(config_file)
     cfg.use_tb=0
     cfg.use_hiplog=0
+    
     ws = hp.workspace(cfg)
     # ws.train_env.base_env.init_render_ax(ax)
     # ws.train_env.reset()

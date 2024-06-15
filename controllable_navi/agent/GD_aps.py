@@ -453,7 +453,14 @@ class APSAgent(DDPGAgent):
         print('min reward: ', reward.min().cpu().item())
         print('mean reward: ', reward.mean().cpu().item())
         print('num reward: ', reward.shape[0])
-
+        
+        
+        #cal optimility
+        angle_samples = obs[:,-4]
+        print("angle diff to goal:", angle_samples.mean().cpu().item()*180/np.pi)
+        print("max angle diff to goal:", angle_samples.max().cpu().item()*180/np.pi)
+        print("min angle diff to goal:", angle_samples.min().cpu().item()*180/np.pi)
+        
         if obs_mask and next_obs_mask:
             # augment and encode
             obs = self.aug(obs)
@@ -468,7 +475,11 @@ class APSAgent(DDPGAgent):
 
         rep = self.aps(_in)
         # task = torch.linalg.lstsq(reward, rep)[0][:rep.size(1), :][0]
-        task = torch.linalg.lstsq(rep, reward)[0].squeeze()
+        result = torch.linalg.lstsq(rep, reward)
+        # task = torch.linalg.lstsq(rep, reward)[0].squeeze()
+        task = result.solution.squeeze()
+        loss = result.residuals
+        print('task infer loss: ', loss.mean().cpu().item())
         task = task / torch.norm(task)
         task = task.cpu().numpy()
         meta = OrderedDict()

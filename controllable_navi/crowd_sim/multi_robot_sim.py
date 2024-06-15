@@ -93,6 +93,7 @@ class MultiRobotSimConfig:
     robot_rotation_constrain: float = np.pi/2
 
     penalty_collision: float = -1#2.
+    penalty_backward: float = 0.2
     reward_goal: float = 10#2.
     goal_factor: float = 10
     goal_range: float = 0.3
@@ -227,6 +228,7 @@ class MultiRobotWorld(dm_env.Environment):
         self._reward_goal = cfg.reward_goal
         self._goal_factor = cfg.goal_factor
         self._goal_range = cfg.goal_range
+        self._penalty_backward = cfg.penalty_backward
         self._velo_factor = cfg.velo_factor
         self._discomfort_penalty_factor = cfg.discomfort_penalty_factor
         self._discomfort_dist = discomfort_dist
@@ -282,6 +284,12 @@ class MultiRobotWorld(dm_env.Environment):
         reward = 0
         dxy = np.array(robot.get_goal_position())-np.array(robot.get_position())
         dg = np.linalg.norm(dxy)
+        goal_direction = np.arctan2(dxy[1],dxy[0])
+        hf = (robot.theta-goal_direction)% (2 * np.pi)
+        if hf > np.pi:
+            hf -= 2 * np.pi
+        if hf>np.pi/2 or hf<np.pi/2:
+            reward -= self._penalty_backward
         if dg <self._goal_range:
                 reward = self._reward_goal * (1-self.global_time/self._max_episode_length)
                 done = True

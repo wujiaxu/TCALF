@@ -99,10 +99,11 @@ class CrowdNaviReward(BaseReward):
             vy = robot_state[3]
             px = robot_state[0]
             py = robot_state[1]
-            if next_obs[-5]<0.3:
-                reward = 0.25 #not important
-            else:
-                reward += 2 * (obs[-5]-next_obs[-5]) #important: even small value can successfully bias the agent to direct to goal
+            # if next_obs[-5]<0.3:
+            #     reward = 0.25 #not important
+            # else:
+            #     reward += 2 * (obs[-5]-next_obs[-5]) #important: even small value can successfully bias the agent to direct to goal
+
             # if dg<0.3:
             #     reward = 0.25
             # else:
