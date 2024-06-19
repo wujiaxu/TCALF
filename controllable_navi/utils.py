@@ -355,6 +355,68 @@ class PBE:
             reward = reward.mean(dim=1, keepdim=True)  # (b1, 1)
         reward = torch.log(reward + 1.0)
         return reward
+    
+class CPBE:
+    """conditioned particle-based entropy based on knn normalized by running mean """
+
+    def __init__(self, rms, knn_clip, knn_k, knn_avg, knn_rms, device) -> None:
+        self.rms = rms
+        self.knn_rms = knn_rms
+        self.knn_k = knn_k
+        self.knn_avg = knn_avg
+        self.knn_clip = knn_clip
+        self.device = device
+
+    def __call__(self, rep, condition):
+        """
+        condition: state value or time
+        """
+        source = target = rep
+        b1, b2 = source.size(0), target.size(0)
+        ds = b1.size(1)
+        # (b1, 1, c) - (1, b2, c) -> (b1, 1, c) - (1, b2, c) -> (b1, b2, c) -> (b1, b2)
+        sim_matrix = torch.norm(source[:, None, :].view(b1, 1, -1) -
+                                target[None, :, :].view(1, b2, -1),
+                                dim=-1,
+                                p=2)
+        c_sim_matrix = torch.norm(condition[:, None, :].view(b1, 1, -1) -
+                                condition[None, :, :].view(1, b2, -1),
+                                dim=-1,
+                                p=2)
+        joint_sim_matrix = torch.max(torch.cat((sim_matrix.unsqueeze(-1),
+                                                c_sim_matrix.unsqueeze(-1)),
+                                                dim=-1),dim=-1)[0]
+        
+        reward, _ = joint_sim_matrix.topk(self.knn_k,
+                                    dim=1,
+                                    largest=False,
+                                    sorted=True)  # (b1, k)
+        if not self.knn_avg:  # only keep k-th nearest neighbor
+            reward = reward[:, -1]
+            reward = reward.reshape(-1, 1)  # (b1, 1)
+            # reward /= self.rms(reward)[0] if self.knn_rms else 1.0
+            # reward = torch.maximum(
+            #     reward - self.knn_clip,
+            #     torch.zeros_like(reward).to(self.device)
+            # ) if self.knn_clip >= 0.0 else reward  # (b1, 1)
+        else:  # average over all k nearest neighbors
+            reward = reward.reshape(-1, 1)  # (b1 * k, 1)
+            # reward /= self.rms(reward)[0] if self.knn_rms else 1.0
+            # reward = torch.maximum(
+            #     reward - self.knn_clip,
+            #     torch.zeros_like(reward).to(
+            #         self.device)) if self.knn_clip >= 0.0 else reward
+            reward = reward.reshape((b1, self.knn_k))  # (b1, k)
+            reward = reward.mean(dim=1, keepdim=True)  # (b1, 1)
+
+        sim_matrix = sim_matrix <= reward
+        c_sim_matrix = c_sim_matrix < reward
+        n_s = torch.sum(sim_matrix,dim=1,keepdim = True) # (b1,1)
+        n_v = torch.sum(c_sim_matrix,dim=1,keepdim = True) # (b1,1)
+        
+        #reward = torch.log(reward + 1.0)
+        reward = torch.special.digamma(n_v+1) / ds + torch.log(reward * 2 + 0.00001)
+        return reward
 
 
 class FloatStats:

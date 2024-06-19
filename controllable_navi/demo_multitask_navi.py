@@ -55,9 +55,10 @@ import matplotlib.pyplot as plt
 
 @dataclasses.dataclass
 class TestConfig():
-    model_dir:str = "2024.06.14/221836_gd_aps_crowdnavi_PointGoalNavi_online"
+    model_dir:str = "2024.06.16/063645_gd_aps_crowdnavi_PointGoalNavi_online"
     num_eval_episodes:int=10
     task:str = 'PassLeftSide'
+    single_robot:bool = True
 
 ConfigStore.instance().store(name="test_workspace_config", node=TestConfig)
 
@@ -87,7 +88,7 @@ def main(test_cfg: omgcf.DictConfig) -> None:
 
     # load
     ws = load_workspace(test_cfg.model_dir)
-    ws.finalize(num_eval_episodes=test_cfg.num_eval_episodes,custom_task=test_cfg.task)
+    ws.finalize(num_eval_episodes=test_cfg.num_eval_episodes,custom_task=test_cfg.task,single_robot=test_cfg.single_robot)
 
 
 if __name__ == '__main__':

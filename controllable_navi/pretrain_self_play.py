@@ -304,12 +304,14 @@ class BaseWorkspace(tp.Generic[C]):
     def global_frame(self) -> int:
         return self.global_step * self.cfg.action_repeat
 
-    def _make_custom_reward(self, seed: int) -> tp.Optional[_goals.BaseReward]:
+    def _make_custom_reward(self) -> tp.Union[None,_goals.BaseReward,tp.List[_goals.BaseReward]]:
         """Creates a custom reward function if provided in configuration
         else returns None
         """
         if self.cfg.custom_reward is None:
             return None
+        if isinstance(self.cfg.custom_reward,omgcf.listconfig.ListConfig):
+            return [_goals.get_reward_function(custom_reward) for custom_reward in self.cfg.custom_reward] 
         return _goals.get_reward_function(self.cfg.custom_reward)
 
     def eval(self) -> None:
@@ -318,12 +320,15 @@ class BaseWorkspace(tp.Generic[C]):
         success_num = 0
         eval_until_episode = utils.Until(self.cfg.num_eval_episodes)
         rewards: tp.List[float] = []
-        
-        seed = 12 * self.cfg.num_eval_episodes + len(rewards)
-        custom_reward = self._make_custom_reward(seed=seed)
+        # seed = 12 * self.cfg.num_eval_episodes + len(rewards)
+        custom_reward = self._make_custom_reward()
         if custom_reward is not None:
-            meta = _init_eval_meta(self, custom_reward)
-            print(meta)
+            if isinstance(custom_reward,tp.List):
+                meta = []
+                for reward in custom_reward:
+                    meta.append(_init_eval_meta(self,reward))
+            else:
+                meta = _init_eval_meta(self, custom_reward)
         else:
             meta = _init_eval_meta(self)
         z_correl = 0.0
@@ -346,22 +351,29 @@ class BaseWorkspace(tp.Generic[C]):
             #     obs = (obs_,mask)
             # else:
             #     obs = time_step.observation
-            
-            for _ in range(robot_num):
-                if custom_reward is None:
-                    meta = _init_eval_meta(self)
-                metas.append(meta)
-                total_reward.append(0.0)
+            if isinstance(meta,tp.List):
+                metas+=meta
+                if len(custom_reward)<robot_num:
+                    for i in range(robot_num-len(custom_reward)):
+                        meta_random = _init_eval_meta(self)
+                        metas.append(meta_random)
+                print(metas)
+            else:
+                for i in range(robot_num):
+                    if custom_reward is None:
+                        meta_random = _init_eval_meta(self)
+                    metas.append(meta_random)
+            total_reward = [0.0]*robot_num 
             self.video_recorder.init(self.eval_env, enabled=True) #enabled=(episode == 0) force the recorder only save episode 0
             while not all([ts.last() for ts in time_step_multi]):
                 actions = []
                 with torch.no_grad(), utils.eval_mode(self.agent):
-                    for time_step,meta in zip(time_step_multi,metas):
+                    for time_step,meta_ in zip(time_step_multi,metas):
                         if time_step.last():
                             actions.append(np.zeros(2))
                             continue
                         action = self.agent.act(time_step.observation,
-                                                meta,
+                                                meta_,
                                                 self.global_step,
                                                 eval_mode=True)
                         actions.append(action)
@@ -469,7 +481,7 @@ class BaseWorkspace(tp.Generic[C]):
                 if name == "global_episode":
                     logger.warning(f"Reloaded agent at global episode {self.global_episode}")
 
-    def finalize(self,num_eval_episodes=None,custom_task=None) -> None:
+    def finalize(self,num_eval_episodes=None,custom_task=None,single_robot=False) -> None:
         print("Running final test", flush=True)
         repeat = 1 #self.cfg.final_tests
         if not repeat:
@@ -499,7 +511,10 @@ class BaseWorkspace(tp.Generic[C]):
             self.global_step+=1
             task = "_".join([self.domain, name])
             self.cfg.task = task
-            self.cfg.custom_reward = task  # for the replay buffer
+            if single_robot:
+                self.cfg.custom_reward = [task]
+            else:
+                self.cfg.custom_reward = task  # for the replay buffer
             self.cfg.seed += 1  # for the sake of avoiding similar seeds
             self.eval_env = self._make_env(phase='test')
             self.eval_rewards_history = []
