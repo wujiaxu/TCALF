@@ -9,6 +9,7 @@ import numpy as np
 from numpy.linalg import norm
 import copy
 
+from CrowdNav_Prediction_AttnGraph.p3at_env import dynamic_model
 from controllable_navi.crowd_sim.C_library.motion_plan_lib import *
 # from controllable_navi.crowd_sim.policy.policy_factory import policy_factory
 # from controllable_navi.crowd_sim.utils.state import tensor_to_joint_state, JointState,ExFullState
@@ -32,11 +33,12 @@ from controllable_navi.crowd_sim.crowd_sim import InformedTimeStep,NaviObsSpace
 class MultiObservationType(enum.IntEnum):
     RAW_SCAN = enum.auto()
     TIME_AWARE_RAW_SCAN = enum.auto()
+    MULTI_ROBOT_TIME_AWARE_RAW_SCAN = enum.auto()
 
 class MultiRobotPhysics:
 
     def __init__(self,env):
-        self._env:MultiRobotWorld = env
+        self._env:CentralizedMultiRobotWorld = env
         # data buffer
         # [agent_num, agent_states, static_obs]
         # item          size        content
@@ -78,7 +80,7 @@ class MultiRobotPhysics:
         return self._env.render(return_rgb=True)
     
 @dataclasses.dataclass
-class MultiRobotSimConfig:
+class CentralizedMultiRobotSimConfig:
     _target_: str = "controllable_navi.crowd_sim.multi_robot_sim.MultiRobotWorld"
     name: str = "MultiRobotWorld"
     scenario: str = "default"
@@ -109,9 +111,9 @@ class MultiRobotSimConfig:
     grid_size: float = 0.25
 
 cs = ConfigStore.instance()
-cs.store(group="crowd_sim", name="MultiRobotWorld", node=MultiRobotSimConfig)
+cs.store(group="crowd_sim", name="CentralizedMultiRobotWorld", node=CentralizedMultiRobotSimConfig)
 
-def build_multirobotworld_task(cfg:MultiRobotSimConfig, task,phase,
+def build_multirobotworld_task(cfg:CentralizedMultiRobotSimConfig, task,phase,
                          discount=1.0,
                          observation_type="time_aware_raw_scan",
                          max_episode_length=200):
@@ -120,6 +122,8 @@ def build_multirobotworld_task(cfg:MultiRobotSimConfig, task,phase,
         obs_type = MultiObservationType.RAW_SCAN
     elif observation_type =="time_aware_raw_scan":
         obs_type = MultiObservationType.TIME_AWARE_RAW_SCAN
+    elif observation_type == "multi_robot_time_aware_raw_scan":
+        obs_type = MultiObservationType.MULTI_ROBOT_TIME_AWARE_RAW_SCAN
     else:
         raise NotImplementedError
 
@@ -154,40 +158,14 @@ def build_multirobotworld_task(cfg:MultiRobotSimConfig, task,phase,
                     "discomfort_dist" : 0.2,
                     "speed_limit":1.0,
                 },
-                'PassLeftSide':{
-                    "reward_func_ids": 2,
-                    "forbiden_zone_y":0.6,
-                    "discomfort_dist" : 0.2,
-                    "speed_limit":1.0,
-                },
-                'PassRightSide':{
-                    "reward_func_ids": 2,
-                    "forbiden_zone_y" : -0.6,
-                    "discomfort_dist" : 0.2,
-                    "speed_limit":1.0,
-                },
-                'FollowWall':{
-                    "reward_func_ids": 3,
-                    "discomfort_dist" : 0.2,
-                    "speed_limit":1.0,
-                },
-                'AwayFromHuman':{
-                    "reward_func_ids": 0,
-                    "discomfort_dist" : 0.8,
-                    "speed_limit":1.0,
-                },
-                'LowSpeed':{
-                    "reward_func_ids": 0,
-                    "speed_limit":0.5,
-                }
                             }
-    return MultiRobotWorld(phase,cfg, config,obs_type,discount,max_episode_length,**tasks_specifications[task])
+    return CentralizedMultiRobotWorld(phase,cfg, config,obs_type,discount,max_episode_length,**tasks_specifications[task])
 
 
-class MultiRobotWorld(dm_env.Environment):
+class CentralizedMultiRobotWorld(dm_env.Environment):
 
     def __init__(self, phase,
-                 cfg:MultiRobotSimConfig, 
+                 cfg:CentralizedMultiRobotSimConfig, 
                  config,
                observation_type=MultiObservationType.TIME_AWARE_RAW_SCAN,
                discount=1.0,
@@ -230,8 +208,14 @@ class MultiRobotWorld(dm_env.Environment):
         for robot in self.robots:
             robot.time_step = self._time_step
             robot.kinematics = "unicycle"
-        self._step_info: list[InfoList]= [InfoList() for _ in range(self._robot_num[1])]
+        self._observation_type = observation_type
+        self._step_info = InfoList() 
         self._current_scan = np.zeros(self.n_laser, dtype=np.float32)
+        if self._observation_type is MultiObservationType.MULTI_ROBOT_TIME_AWARE_RAW_SCAN:
+            self._observation_buffer = np.zeros((self._robot_num[1],729),dtype=np.float32)
+        else:
+            raise NotImplementedError
+        self._action_buffer = np.zeros((self._robot_num[1],2))
 
         self._discount = discount
         self._penalty_collision = cfg.penalty_collision
@@ -245,7 +229,6 @@ class MultiRobotWorld(dm_env.Environment):
         self._forbiden_zone_y = forbiden_zone_y
         self._to_wall_dis = to_wall_dist
         self._speed_limit = speed_limit
-        self._observation_type = observation_type
         self._local_map_size = cfg.local_map_size
         self._grid_size = cfg.grid_size
         self._occu_map_size = int((self._local_map_size//self._grid_size)**2) 
@@ -303,7 +286,7 @@ class MultiRobotWorld(dm_env.Environment):
         if dg <self._goal_range:
                 reward = self._reward_goal * (1-self.global_time/self._max_episode_length)
                 done = True
-                self._step_info[robot.id].add(ReachGoal())
+                
         reward += self._goal_factor * (robot._last_dg-dg)
 
         robot._last_dg = dg # type: ignore
@@ -393,15 +376,13 @@ class MultiRobotWorld(dm_env.Environment):
         return 
     
     def observation_spec(self):
-        if self._observation_type is MultiObservationType.RAW_SCAN:
-            return NaviObsSpace({"scan":(720,),"robot_state":(5,)}, dtype=np.float32, name='relative pose to goal')
-        elif self._observation_type is MultiObservationType.TIME_AWARE_RAW_SCAN:
-            return NaviObsSpace({"scan":(720,),"robot_state":(7,)}, dtype=np.float32, name='relative pose to goal')
+        if self._observation_type is MultiObservationType.MULTI_ROBOT_TIME_AWARE_RAW_SCAN:
+            return NaviObsSpace({"scan":(self._robot_num[1],720,),"robot_state":(self._robot_num[1],9,)}, dtype=np.float32, name='relative pose to goal')
         else:
             raise NotImplementedError
 
     def action_spec(self):
-        return specs.BoundedArray(shape=(2,), dtype=np.float32, name='action', minimum=-1.0, maximum=1.0)
+        return specs.BoundedArray(shape=(self._robot_num[1],2,), dtype=np.float32, name='action', minimum=-1.0, maximum=1.0)
     #specs.Array(shape=(2,), dtype=np.float32, name='action')
     
     # TODO add custom case no. input
@@ -422,54 +403,6 @@ class MultiRobotWorld(dm_env.Environment):
             self.robots[0].set(0,-2, 0, 2, 0,0, np.arctan2(2,0))
             self.robots[1].set(0,2, 0, -2, 0,0, np.arctan2(-2,0))
             self.current_robot_num = 2
-        elif self.phase=="test" and test_case==-1:
-            # value dist test
-            self.robots[0].set(0.5,0, 0, 2, 0,0, np.arctan2(2,-0.5))
-            self.robots[1].set(-0.5,0, 0, -2, 0,0, np.arctan2(-2,0.5))
-            print("case -1")
-            self.current_robot_num = 2
-        elif self.phase=="test" and test_case==-2:
-            # value dist test
-            self.robots[0].set(-0.5,0, 0, 2, 0,0, np.arctan2(2,0.5))
-            self.robots[1].set(0.5,0, 0, -2, 0,0, np.arctan2(-2,-0.5))
-            print("case -2")
-            self.current_robot_num = 2
-        elif self.phase=="test" and test_case==-3:
-            # value dist test
-            self.robots[0].set(-0.3,-1.5, 0, 2, 0,0, np.arctan2(3.5,0.3))
-            self.robots[1].set(0.3,1.5, 0, -2, 0,0, np.arctan2(-3.5,-0.3))
-            print("case -3")
-            self.current_robot_num = 2
-        elif self.phase=="test" and test_case==-4:
-            # value dist test
-            self.robots[0].set(0.3,-1.5, 0, 2, 0,0, np.arctan2(3.5,-0.3))
-            self.robots[1].set(-0.3,1.5, 0, -2, 0,0, np.arctan2(-3.5,0.3))
-            print("case -4")
-            self.current_robot_num = 2
-        elif self.phase=="test" and test_case==-5:
-            # value dist test
-            self.robots[0].set(0.3,0.1, 0, 2, 0,0, np.arctan2(2,-0.3))
-            self.robots[1].set(-0.5,-0.1, 0, -2, 0,0, np.arctan2(-2,0.3))
-            print("case -5")
-            self.current_robot_num = 2
-        elif self.phase=="test" and test_case==-6:
-            # value dist test
-            self.robots[0].set(-0.3,-0.1, 0, 2, 0,0, np.arctan2(2,0.3))
-            self.robots[1].set(0.3,0.1, 0, -2, 0,0, np.arctan2(-2,-0.3))
-            print("case -6")
-            self.current_robot_num = 2
-        elif self.phase=="test" and test_case==-7:
-            # value dist test
-            self.robots[0].set(0.7,0.1, 0, 2, 0,0, np.arctan2(2,-0.7))
-            self.robots[1].set(-0.7,-0.1, 0, -2, 0,0, np.arctan2(-2,0.7))
-            print("case -7")
-            self.current_robot_num = 2
-        elif self.phase=="test" and test_case==-8:
-            # value dist test
-            self.robots[0].set(-0.7,-0.1, 0, 2, 0,0, np.arctan2(2,0.7))
-            self.robots[1].set(0.7,0.1, 0, -2, 0,0, np.arctan2(-2,-0.7))
-            print("case -8")
-            self.current_robot_num = 2
         else:            
             if self.current_robot_num == 0 or self._fix_robot_num==False:
                 self.current_robot_num = np.random.randint(self._robot_num[0],self._robot_num[1]+1)
@@ -485,19 +418,24 @@ class MultiRobotWorld(dm_env.Environment):
             dxy = np.array(robot.get_goal_position())-np.array(robot.get_position())
             robot._last_dg = norm(dxy)
             robot.task_done = False
-        for i, step_info in enumerate(self._step_info[:self.current_robot_num]):
-            step_info.reset()
-            step_info.add(Nothing())
-            step_info.get_task_info(self.robots[i].px,self.robots[i].py,self.robots[i].gx,self.robots[i].gy)
+        
+        self._step_info.reset()
+        self._step_info.add(Nothing())
+        self._step_info.get_task_info(self.robots[i].px,self.robots[i].py,self.robots[i].gx,self.robots[i].gy)
 
-        return [InformedTimeStep(
+        self._observation_buffer = np.zeros_like(self._observation_buffer,dtype=np.float32)
+        for i, agent_state in enumerate(self._state):
+            self._observation_buffer[i] = agent_state
+        self._action_buffer = np.zeros((self._robot_num[1],2))
+
+        return InformedTimeStep(
             step_type=dm_env.StepType.FIRST,
-            action=np.array([0,0]),
+            action=self._action_buffer,
             reward=0.0,
             discount=1.0,
-            observation=self._state[i],
-            info = copy.deepcopy(self._step_info[i]),
-            ) for i in range(self.current_robot_num)]
+            observation=self._observation_buffer.flatten(),
+            info = copy.deepcopy(self._step_info),
+            ) 
     
     def get_static_scan(self,id:int):
         num_line = sum([len(obstacle)-1 for obstacle in self._layout["vertices"]])+4 #for boundary
@@ -580,11 +518,6 @@ class MultiRobotWorld(dm_env.Environment):
         multi_robot_obs = []
         collisions = []
         for id in range(self.current_robot_num):
-            if self.robots[id].task_done == True:
-                collisions.append(False)
-                multi_robot_obs.append(np.zeros(self.observation_spec().shape,
-                                                dtype=self.observation_spec().dtype))
-                continue
             dxy = np.array(self.robots[id].get_goal_position())-np.array(self.robots[id].get_position())
             dg = norm(dxy)
             goal_direction = np.arctan2(dxy[1],dxy[0])
@@ -616,15 +549,15 @@ class MultiRobotWorld(dm_env.Environment):
             else:
                 collisions.append(False)
         
-            if self._observation_type == MultiObservationType.RAW_SCAN:
-                multi_robot_obs.append(np.hstack([np.clip(self._current_scan,self.laser_min_range,self.laser_max_range),
-                                np.array([dg,hf,vx,vy,self.robots[id].radius],dtype=np.float32)]) )
-            elif self._observation_type == MultiObservationType.TIME_AWARE_RAW_SCAN:
+            if self._observation_type == MultiObservationType.MULTI_ROBOT_TIME_AWARE_RAW_SCAN:
                 multi_robot_obs.append(
                                 np.hstack([np.clip(self._current_scan,self.laser_min_range,self.laser_max_range),
                                 np.array([self._num_episode_steps/self._max_episode_length,
                                             np.log(self._max_episode_length),
-                                            dg, hf,vx,vy,self.robots[id].radius],dtype=np.float32)]) )
+                                            self.robots[id].px, self.robots[id].py,
+                                            self.robots[id].vx,self.robots[id].vx,
+                                            self.robots[id].gx, self.robots[id].gy,
+                                            self.robots[id].radius],dtype=np.float32)]) )
             else:
                 raise NotImplementedError
         
@@ -635,66 +568,57 @@ class MultiRobotWorld(dm_env.Environment):
         #actions: BX2
         """
         for i, robot in enumerate(self.robots[:self.current_robot_num]):
-            if robot.task_done == True:
-                continue
             robot_action = ActionVW(((actions[i,0]+1.)/2.)*robot.v_pref,actions[i,1]*robot.rotation_constraint)
             # update all agents
             robot.step(robot_action)
 
         self._state,collisions = self.get_obs()
+        for i, agent_state in enumerate(self._state):
+            self._observation_buffer[i] = agent_state
         
         self.global_time += self._time_step
         self._num_episode_steps += 1
         
-        discounts = []
-        rewards = []
-        step_types = []
-        for i, robot in enumerate(self.robots[:self.current_robot_num]):
-            if robot.task_done == True:
-                rewards.append(0.)
-                discounts.append(0.)
-                step_type = dm_env.StepType.LAST
-                step_types.append(step_type)
-                continue
-            self._step_info[i].reset()
-            step_type = dm_env.StepType.MID
-            
-            # cal reward
-            discount = 1.0
-            if collisions[i]:
-                reward = self._penalty_collision
-                discount = 0
-                step_type = dm_env.StepType.LAST
-                self._step_info[i].add(Collision())
-                robot.task_done = True
-            elif (self._max_episode_length is not None and
-                self._num_episode_steps >= self._max_episode_length):
-                reward = -self._reward_goal
-                step_type = dm_env.StepType.LAST
-                discount = 0
-                self._step_info[i].add(Timeout())
-                robot.task_done = True
-            else:
+        step_type = dm_env.StepType.MID
+        discount = 1.0
+        self._step_info.reset()
+        
+        if any(collisions):
+            reward = self._penalty_collision
+            discount = 0
+            step_type = dm_env.StepType.LAST
+            self._step_info.add(Collision())
+        elif (self._max_episode_length is not None and
+            self._num_episode_steps >= self._max_episode_length):
+            reward = -self._reward_goal
+            step_type = dm_env.StepType.LAST
+            discount = 0
+            self._step_info.add(Timeout())
+        else:
+            dones = []
+            rewards = []
+            for i, robot in enumerate(self.robots[:self.current_robot_num]):
                 reward,done= self.cal_reward(robot)
-                if done:
-                    step_type = dm_env.StepType.LAST
-                    discount = 0
-                    robot.task_done = True
-            rewards.append(reward)
-            discounts.append(discount)
-            step_types.append(step_type)
-            self.last_reward = reward
-            if self._step_info[i].empty():
-                self._step_info[i].add(Nothing())
+                dones.append(done)
+                rewards.append(reward)
+            reward = sum(rewards)/self.current_robot_num
+            if all(dones):
+                step_type = dm_env.StepType.LAST
+                discount = 0
+                self._step_info.add(ReachGoal())
+        
+        self.last_reward = reward
+        if self._step_info.empty():
+            self._step_info.add(Nothing())
 
-        return [InformedTimeStep(
-            step_type=step_types[i],
-            action=actions[i],
-            reward=np.float32(rewards[i]),
-            discount=discounts[i],
-            observation=self._state[i],
-            info = copy.deepcopy(self._step_info[i]),
-            ) for i in range(self.current_robot_num)]
+        return InformedTimeStep(
+            step_type=step_type,
+            action=actions,
+            reward=np.float32(reward),
+            discount=discount,
+            observation=self._observation_buffer.flatten(),
+            info = copy.deepcopy(self._step_info),
+            )
 
     def render(self, return_rgb=True):
         # x,y = self._layout["boundary"].exterior.xy

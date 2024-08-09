@@ -27,7 +27,7 @@ class ShmemVecEnv(VecEnv):
     Optimized version of SubprocVecEnv that uses shared variables to communicate observations.
     """
 
-    def __init__(self, env_fns, human_nums, spaces=None, context='spawn'):
+    def __init__(self, env_fns, agent_nums, spaces=None, context='spawn'):
         """
         If you don't specify observation_space, we'll have to create a dummy
         environment to get it.
@@ -45,6 +45,7 @@ class ShmemVecEnv(VecEnv):
             dummy.close()
             del dummy
         VecEnv.__init__(self, len(env_fns), observation_space, action_space)
+        self.agent_nums=agent_nums
         # self.obs_keys, self.obs_shapes, self.obs_dtypes = obs_space_info(observation_space) #TODO
         self.obs_shape = observation_space.shape
         self.obs_dtype = observation_space.dtype
@@ -52,12 +53,12 @@ class ShmemVecEnv(VecEnv):
         self.obs_bufs = [
             [ctx.Array(ctypes.c_float, int(np.prod(self.obs_shape))) 
              for _ in range(human_num)]
-            for human_num in human_nums]
+            for human_num in agent_nums]
         self.phy_bufs = [
             [ctx.Array(ctypes.c_float, int(1+human_num*5+100)) 
              for _ in range(human_num)]
-            for human_num in human_nums]
-        self.phy_shapes = [int(1+human_num*5+100) for human_num in human_nums]
+            for human_num in agent_nums]
+        self.phy_shapes = [int(1+human_num*5+100) for human_num in agent_nums]
         self.parent_pipes = []
         self.procs = []
         with clear_mpi_env_vars():
@@ -244,6 +245,7 @@ def _subproc_worker(pipe, parent_pipe, env_fn_wrapper, obs_bufs, phy_bufs, phy_s
                 info = [time_step.info for time_step in multi_informed_time_step]
                 phy = [time_step.physics for time_step in multi_informed_time_step]
                 pipe.send((_write_obs(obs), reward, discount, info, _write_phy(phy)))
+
             elif cmd == 'render':
                 pipe.send(env.render(return_rgb=True))
             elif cmd == 'close':

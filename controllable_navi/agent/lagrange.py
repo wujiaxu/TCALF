@@ -45,6 +45,7 @@ class Lagrange:
         self,
         lagrangian_multiplier_init: float,
         lagrangian_upper_bound: float,
+        lagrangian_lower_bound: float,
         k_p: float = 0.0,
         k_i: float = 0.0003,
         k_d: float = 0.0,
@@ -60,6 +61,7 @@ class Lagrange:
         assert k_d>=0
 
         self.lagrangian_upper_bound: float = lagrangian_upper_bound
+        self.lagrangian_lower_bound: float = lagrangian_lower_bound
         self.pid_Kp: float = k_p
         self.pid_Ki: float = k_i
         self.pid_Kd: float = k_d
@@ -114,7 +116,7 @@ class Lagrange:
         pid_o = (self.pid_Kp * self._delta_p + self.pid_i +
             self.pid_Kd * pid_d)
         
-        self._lagrangian_multiplier = max(0., pid_o)
+        self._lagrangian_multiplier = max(self.lagrangian_lower_bound, pid_o)
         self._lagrangian_multiplier = min(self._lagrangian_multiplier, self.lagrangian_upper_bound)
 
         self.cost_ds.append(self._cost_d)

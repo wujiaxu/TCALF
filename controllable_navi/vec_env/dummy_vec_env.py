@@ -12,16 +12,17 @@ class DummyVecEnv(VecEnv):
     Useful when debugging and when num_env == 1 (in the latter case,
     avoids communication overhead)
     """
-    def __init__(self, env_fns,human_nums):
+    def __init__(self, env_fns,agent_nums):
         """
         Arguments:
 
         env_fns: iterable of callables      functions that build environments
         """
         self.envs = [fn() for fn in env_fns]
-        total_agent_num = sum(human_nums)
+        total_agent_num = sum(agent_nums)
         env = self.envs[0]
         VecEnv.__init__(self, len(env_fns), env.observation_spec(), env.action_spec())
+        self.agent_nums = agent_nums
         obs_space = env.observation_spec()
         # self.keys, shapes, dtypes = obs_space_info(obs_space) #TODO
         self.obs_shape = obs_space.shape

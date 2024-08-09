@@ -2,8 +2,8 @@
 #
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
-from pathlib import Path
-import pdb  # pylint: disable=unused-import
+# from pathlib import Path
+# import pdb  # pylint: disable=unused-import
 import typing as tp
 import dataclasses
 import numpy as np
@@ -11,26 +11,29 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from collections import OrderedDict
+from pathlib import Path
 
 from controllable_navi import utils
 from hydra.core.config_store import ConfigStore
 import omegaconf
 
 from controllable_navi.dmc import TimeStep
-from .ddpg import DDPGAgent, MetaDict, DDPGAgentConfig
+from .ddpg import DDPGAgent, MetaDict, DDPGAgentConfig,Actor,Critic
 from controllable_navi.in_memory_replay_buffer import ReplayBuffer
 from typing import Any, Dict, Tuple
+from .crowd_aps import CriticSF,APS
 from controllable_navi.agent.lagrange import Lagrange
+from torch.utils.tensorboard import SummaryWriter
 
 # TODO(HL): how to include GPI for continuous domain?
 
 
 @dataclasses.dataclass
-class CrowdAPSAgentConfig(DDPGAgentConfig):
-    _target_: str = "controllable_navi.agent.crowd_aps.APSAgent" #TODO error
-    name: str = "aps"
+class C_APSAgentConfig(DDPGAgentConfig):
+    _target_: str = "controllable_navi.agent.C_aps.APSAgent" 
+    name: str = "c_aps"
     update_encoder: bool = omegaconf.II("update_encoder")
-    sf_dim: int = 10
+    sf_dim: int = 5
     update_task_every_step: int = 5
     knn_rms: bool = True
     knn_k: int = 12
@@ -39,145 +42,201 @@ class CrowdAPSAgentConfig(DDPGAgentConfig):
     num_init_steps: int = 4096  # set to ${num_train_frames} to disable finetune policy parameters
     lstsq_batch_size: int = 4096
     num_inference_steps: int = 10000
-    # balancing_factor: float = 1.0
-    # accept = returns >= self._config.smerl_target - self._config.smerl_margin
-    # smerl_margin: float = 0.5
-    # smerl_target: float = 1.5
+    balancing_factor: float = 1.0
+    use_constraint: bool = True
+    init_constraint_value: float = 1.25
+    max_constraint_value: float = 1.8
+    dynamic_contrain_step: int = 2000000
+    constraint_on: str = "extrinsic_value"
     base_model_path: str = "/home/dl/wu_ws/TCALF/controllable_navi/exp_local/2024.05.04/130514_ddpg_crowdnavi_PointGoalNavi_online/models"
-    lagrangian_multiplier_init: float = 0.001
-    lagrangian_multiplier_lr: float = 0.035
-    lagrange_multiplier_upper_bound: float = 50
+    optimality_ratio: float = 0.9 #[0.,1]
+    lagrangian_k_p: float = 0.0003
+    lagrangian_k_i: float = 0.0003
+    lagrangian_k_d: float = 0.0003
+    lagrange_multiplier_upper_bound: float = 10.
+    lagrangian_multiplier_lower_bound: float = 0.1
     lagrange_update_interval: int = 1
-    lagrange_update_sample_num: int = 20
-    constrain_relaxation_alpha: float = 0.8
-
+    use_self_supervised_encoder: bool = False
+    self_supervised_encoder:str = "IDP"
+    sse_dim: int = 128
 
 cs = ConfigStore.instance()
-cs.store(group="agent", name="crowd_aps", node=CrowdAPSAgentConfig)
+cs.store(group="agent", name="c_aps", node=C_APSAgentConfig)
 
-
-class CriticSF(nn.Module):
-    def __init__(self, obs_type, obs_dim, action_dim, feature_dim, hidden_dim,
-                 sf_dim) -> None:
+class ICM(nn.Module):
+    # inverse dynamic presentation for embedding obs to controllable state
+    """
+    Same as ICM, with a trunk to save memory for KNN
+    """
+    def __init__(self, obs_dim, action_dim, hidden_dim,icm_rep_dim) -> None:
         super().__init__()
 
-        self.obs_type = obs_type
+        self.trunk = nn.Sequential(nn.Linear(obs_dim, icm_rep_dim),
+                                   nn.LayerNorm(icm_rep_dim), nn.Tanh())
 
-        if obs_type == 'pixels':
-            # for pixels actions will be added after trunk
-            self.trunk = nn.Sequential(nn.Linear(obs_dim, feature_dim),
-                                       nn.LayerNorm(feature_dim), nn.Tanh())
-            trunk_dim = feature_dim + action_dim
-        else:
-            # for states actions come in the beginning
-            self.trunk = nn.Sequential(
-                nn.Linear(obs_dim + action_dim, hidden_dim),
-                nn.LayerNorm(hidden_dim), nn.Tanh())
-            trunk_dim = hidden_dim
+        self.forward_net = nn.Sequential(
+            nn.Linear(icm_rep_dim + action_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, icm_rep_dim))
 
-        def make_q():
-            q_layers = []
-            q_layers += [
-                nn.Linear(trunk_dim, hidden_dim),
-                nn.ReLU(inplace=True)
-            ]
-            if obs_type == 'pixels':
-                q_layers += [
-                    nn.Linear(hidden_dim, hidden_dim),
-                    nn.ReLU(inplace=True)
-                ]
-            q_layers += [nn.Linear(hidden_dim, sf_dim)]
-            return nn.Sequential(*q_layers)
-
-        self.Q1 = make_q()
-        self.Q2 = make_q()
+        self.backward_net = nn.Sequential(
+            nn.Linear(2 * icm_rep_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, action_dim), nn.Tanh())
 
         self.apply(utils.weight_init)
 
-    def forward(self, obs, action, task) -> Tuple[Any, Any]:
-        inpt = obs if self.obs_type == 'pixels' else torch.cat([obs, action],
-                                                               dim=-1)
-        h = self.trunk(inpt)
-        h = torch.cat([h, action], dim=-1) if self.obs_type == 'pixels' else h
+    def forward(self, obs, action, next_obs) -> Tuple[Any, Any]:
+        assert obs.shape[0] == next_obs.shape[0]
+        assert obs.shape[0] == action.shape[0]
 
-        q1 = self.Q1(h)
-        q2 = self.Q2(h)
+        obs = self.trunk(obs)
+        next_obs = self.trunk(next_obs)
+        next_obs_hat = self.forward_net(torch.cat([obs, action], dim=-1))
+        action_hat = self.backward_net(torch.cat([obs, next_obs], dim=-1))
 
-        q1 = torch.einsum("bi,bi->b", task, q1).reshape(-1, 1)
-        q2 = torch.einsum("bi,bi->b", task, q2).reshape(-1, 1)
+        forward_error = torch.norm(next_obs - next_obs_hat,
+                                   dim=-1,
+                                   p=2,
+                                   keepdim=True)
+        backward_error = torch.norm(action - action_hat,
+                                    dim=-1,
+                                    p=2,
+                                    keepdim=True)
 
-        return q1, q2
+        return forward_error, backward_error
 
-
-class APS(nn.Module):
-    def __init__(self, obs_dim, sf_dim, hidden_dim) -> None:
-        super().__init__()
-        self.state_feat_net = nn.Sequential(nn.Linear(obs_dim, hidden_dim),
-                                            nn.ReLU(),
-                                            nn.Linear(hidden_dim, hidden_dim),
-                                            nn.ReLU(),
-                                            nn.Linear(hidden_dim, sf_dim))
-
-        self.apply(utils.weight_init)
-
-    def forward(self, obs, norm=True) -> Any:
-        state_feat = self.state_feat_net(obs)
-        state_feat = F.normalize(state_feat, dim=-1) if norm else state_feat
-        return state_feat
-
-
+    def get_rep(self, obs, action) -> Any:
+        rep = self.trunk(obs)
+        return rep
+    
 class APSAgent(DDPGAgent):
     def __init__(self, **kwargs: tp.Any) -> None:
-        cfg = CrowdAPSAgentConfig(**kwargs)
+        
+        cfg = C_APSAgentConfig(**kwargs)
 
         # create actor and critic
         # increase obs shape to include task dim (through meta_dim)
         super().__init__(**kwargs, meta_dim=cfg.sf_dim)
-        self.cfg: CrowdAPSAgentConfig = cfg  # override base ddpg cfg type
-        # print(self.obs_dim, self.action_dim) -> 4112 2 (4112=4102+10 10 is meta dim, added when ddpgagent init)
+        self.cfg: C_APSAgentConfig = cfg  # override base ddpg cfg type
+        
+        if self.cfg.use_self_supervised_encoder:
+            self.sse_dim = self.cfg.sse_dim
+            if self.cfg.self_supervised_encoder=="IDP":
+                # inverse dynamic feature embedding
+                self.sse = ICM(self.obs_dim - self.sf_dim,self.action_dim,self.hidden_dim,self.sse_dim).to(kwargs['device'])
+                self.sse_opt = torch.optim.Adam(self.sse.parameters(), lr=self.lr)
+            else:
+                raise NotImplementedError
+        else:
+            self.sse_dim = self.obs_dim - self.sf_dim
+            self.sse = nn.Identity()
+            self.sse_opt = None
+
+        self.actor = Actor('states', self.obs_dim, self.action_dim,
+                           cfg.feature_dim, cfg.hidden_dim).to(cfg.device)
+        self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=cfg.lr)
         # overwrite critic with critic sf
-        self.critic = CriticSF(cfg.obs_type, self.obs_dim, self.action_dim,
+        # # input of critic sf is idp feature with dim=cfg.hidden_dim
+        self.critic = CriticSF('states', self.obs_dim, self.action_dim,
                                self.feature_dim, self.hidden_dim,
                                self.sf_dim).to(self.device)
-        self.critic_target = CriticSF(self.obs_type, self.obs_dim,
+        self.critic_target = CriticSF('states', self.obs_dim,
                                       self.action_dim, self.feature_dim,
                                       self.hidden_dim,
                                       self.sf_dim).to(self.device)
         self.critic_target.load_state_dict(self.critic.state_dict())
         self.critic_opt = torch.optim.Adam(self.critic.parameters(),
                                            lr=self.lr)
+        
+        self.critic_goal = Critic('states', self.obs_dim - self.sf_dim, self.action_dim,
+                               self.feature_dim, self.hidden_dim).to(self.device)
+        self.critic_goal_target = Critic('states', self.obs_dim - self.sf_dim,
+                                      self.action_dim, self.feature_dim,
+                                      self.hidden_dim).to(self.device)
+        self.critic_goal_target.load_state_dict(self.critic_goal.state_dict())
+        self.critic_goal_opt = torch.optim.Adam(self.critic_goal.parameters(),
+                                           lr=self.lr)
 
-        self.aps = APS(self.obs_dim - self.sf_dim, self.sf_dim,
+        # aps is denoted as phi in the original paper
+        # input of aps is idp feature with dim=cfg.hidden_dim
+        self.aps = APS((self.obs_dim - self.sf_dim)*2+self.action_dim, self.sf_dim,
                        kwargs['hidden_dim']).to(kwargs['device'])
-        # print(self.critic)
-        #  (trunk): Sequential(
-        #     (0): Linear(in_features=4114, out_features=1024, bias=True)
-        #     (1): LayerNorm((1024,), eps=1e-05, elementwise_affine=True)
-        #     (2): Tanh()
-        # )
+        self.aps_opt = torch.optim.Adam(self.aps.parameters(), lr=self.lr)
+        
         # particle-based entropy
         rms = utils.RMS(self.device)
         self.pbe = utils.PBE(rms, cfg.knn_clip, cfg.knn_k, cfg.knn_avg, cfg.knn_rms,
                              cfg.device)
-        # self.balancing_factor = cfg.balancing_factor
-        # self.smerl_target = cfg.smerl_target
-        # self.smerl_margin = cfg.smerl_margin
-
+        
         # base model
         checkpoint = Path(cfg.base_model_path)/"latest.pt"
         with checkpoint.open("rb") as f:
             payload = torch.load(f, map_location=cfg.device)
         self.base_model: DDPGAgent = payload["agent"]
-        self.lagrange = Lagrange(cfg.lagrangian_multiplier_init,cfg.lagrangian_multiplier_lr,cfg.lagrange_multiplier_upper_bound)
-        self.update_lagrange_every_steps = self.update_every_steps * cfg.lagrange_update_interval
         self.base_model_meta = OrderedDict()
-        # optimizers
-        self.aps_opt = torch.optim.Adam(self.aps.parameters(), lr=self.lr)
 
+        self.balancing_factor = cfg.balancing_factor
+        self.constrain_value = cfg.init_constraint_value
+        self.lagrange = Lagrange(cfg.balancing_factor,
+                                 cfg.lagrange_multiplier_upper_bound,
+                                 cfg.lagrangian_multiplier_lower_bound,
+                                 cfg.lagrangian_k_p,cfg.lagrangian_k_i,cfg.lagrangian_k_d)
+        self.update_lagrange_every_steps = self.update_every_steps * cfg.lagrange_update_interval
+        
         self.train()
         self.critic_target.train()
-
         self.aps.train()
+        self.critic_goal.train()
+        self.critic_goal_target.train()
+        if self.cfg.use_self_supervised_encoder:
+            self.sse.train()
+
+    #TODO debug
+    """
+    RuntimeError: Tracer cannot infer type of TruncatedNormal(loc: torch.Size([1, 2]), scale: torch.Size([1, 2]))
+    :Only tensors and (possibly nested) tuples of tensors, lists, or dictsare supported as inputs or outputs of traced functions, 
+    but instead got value of type TruncatedNormal.
+    """
+    def add_to_tb(self,writer:SummaryWriter)->None:
+        dummy_input = torch.randn(1, self.sse_dim + self.sf_dim).to(self.cfg.device)
+        writer.add_graph(self.actor,(dummy_input,dummy_input[:,:1]))
+        writer.add_graph(self.critic,(dummy_input,dummy_input[:,:2]))
+        writer.add_graph(self.critic_target,(dummy_input,dummy_input[:,:2]))
+        dummy_input = torch.randn(1, self.sse_dim).to(self.cfg.device)
+        writer.add_graph(self.critic_goal,(dummy_input,dummy_input[:,:2]))
+        writer.add_graph(self.critic_goal_target,(dummy_input,dummy_input[:,:2]))
+        dummy_input = torch.randn(1,self.sse_dim*2+self.action_dim).to(self.cfg.device)
+        writer.add_graph(self.aps,dummy_input)
+        if self.cfg.use_self_supervised_encoder:
+            dummy_input = torch.randn(1,self.obs_dim - self.sf_dim).to(self.cfg.device)
+            writer.add_graph(self.sse,dummy_input)
+        return 
+
+    def act(self, obs, meta, step, eval_mode) -> np.ndarray:
+        if self.cfg.use_sequence:
+            seq,mask = obs
+            seq = torch.as_tensor(seq, device=self.device).unsqueeze(0)
+            mask = torch.as_tensor(mask, device=self.device).unsqueeze(0)
+            h = self.encoder(seq,mask)
+        else:
+            obs = torch.as_tensor(obs, device=self.device).unsqueeze(0)
+            h = self.encoder(obs)
+        # if self.cfg.use_self_supervised_encoder:
+        #     h = self.sse.embed(h) #<--used only for state entropy estimation
+        inputs = [h]
+        for value in meta.values():
+            value = torch.as_tensor(value, device=self.device).unsqueeze(0)
+            inputs.append(value)
+        inpt = torch.cat(inputs, dim=-1)
+        #assert obs.shape[-1] == self.obs_shape[-1]
+        stddev = utils.schedule(self.stddev_schedule, step)
+        dist = self.actor(inpt, stddev)
+        if eval_mode:
+            action = dist.mean
+        else:
+            action = dist.sample(clip=None)
+            if step < self.num_expl_steps:
+                action.uniform_(-1.0, 1.0)
+        return action.cpu().numpy()[0]
 
     def init_meta(self) -> tp.Dict[str, np.ndarray]:
         if self.solved_meta is not None:
@@ -188,6 +247,14 @@ class APSAgent(DDPGAgent):
         meta = OrderedDict()
         meta['task'] = task_array
         return meta
+    
+    def update_constraint_value(self,step,new_value=None):
+        if new_value:
+            self.constrain_value = new_value
+        else:
+            if step < self.cfg.dynamic_contrain_step:
+                self.constrain_value = self.cfg.init_constraint_value\
+                                    +step*(self.cfg.max_constraint_value-self.cfg.init_constraint_value)/self.cfg.dynamic_contrain_step #TODO 
 
     # pylint: disable=unused-argument
     def update_meta(
@@ -202,10 +269,10 @@ class APSAgent(DDPGAgent):
             return self.init_meta()
         return meta
 
-    def update_aps(self, task, next_obs, step) -> Dict[str, Any]:
+    def update_aps(self, task, obs, action, next_obs, step) -> Dict[str, Any]:
         metrics: tp.Dict[str, float] = {}
 
-        loss = self.compute_aps_loss(next_obs, task)
+        loss = self.compute_aps_loss(obs, action, next_obs, task)
 
         self.aps_opt.zero_grad(set_to_none=True)
         if self.encoder_opt is not None:
@@ -220,11 +287,18 @@ class APSAgent(DDPGAgent):
 
         return metrics
 
-    def compute_intr_reward(self, task, next_obs, step) -> Tuple[Any, Any]:
+    def compute_intr_reward(self, task, obs, action, next_obs, step) -> Tuple[Any, Any]:
         # maxent reward
         with torch.no_grad():
-            rep = self.aps(next_obs, norm=False)
-        reward = self.pbe(rep)
+            _in = torch.cat([obs, action, next_obs], dim=1)
+            rep = self.aps(_in, norm=False)
+        
+        # Encoding
+        if self.cfg.use_self_supervised_encoder:
+            f_next_obs = self.sse.get_rep(obs, action)
+        else:
+            f_next_obs = rep#next_obs~6.10 #~5.28 next_obs, but original paper used rep
+        reward = self.pbe(f_next_obs) #not encoded? hahahaha
         intr_ent_reward = reward.reshape(-1, 1)
 
         # successor feature reward
@@ -233,9 +307,10 @@ class APSAgent(DDPGAgent):
 
         return intr_ent_reward, intr_sf_reward
 
-    def compute_aps_loss(self, next_obs, task) -> Any:
+    def compute_aps_loss(self, obs, action, next_obs, task) -> Any:
         """MLE loss"""
-        loss = -torch.einsum("bi,bi->b", task, self.aps(next_obs)).mean()
+        _in = torch.cat([obs, action, next_obs], dim=1)
+        loss = -torch.einsum("bi,bi->b", task, self.aps(_in)).mean()
         return loss
 
     def update(self, replay_loader: ReplayBuffer, step: int) -> tp.Dict[str, float]:
@@ -243,36 +318,43 @@ class APSAgent(DDPGAgent):
 
         if step % self.update_every_steps != 0:
             return metrics
-        
-        if step % self.update_lagrange_every_steps == 0:
-            metrics.update(self.update_lagrange(replay_loader,step))
 
-        batch = replay_loader.sample(self.cfg.batch_size).to(self.device)
+        if self.cfg.use_sequence:
+            batch = replay_loader.sample_sequence(self.cfg.batch_size).to(self.device)
+            obs, obs_mask, action, extr_reward, discount, next_obs, next_obs_mask = batch.unpack_with_mask()
+            # augment and encode
+            obs = self.aug(obs)
+            obs = self.encoder(obs,obs_mask)
+            next_obs = self.aug(next_obs)
+            next_obs = self.encoder(next_obs,next_obs_mask)
+        else:
+            batch = replay_loader.sample(self.cfg.batch_size).to(self.device)
 
-        obs, action, extr_reward, discount, next_obs = batch.unpack()
+            obs, action, extr_reward, discount, next_obs = batch.unpack()
+
+            # augment and encode
+            obs = self.aug_and_encode(obs)
+            next_obs = self.aug_and_encode(next_obs)
         task = batch.meta["task"]
 
-        # augment and encode
-        obs = self.aug_and_encode(obs)
-        next_obs = self.aug_and_encode(next_obs)
+        if self.cfg.use_self_supervised_encoder:
+            metrics.update(self.update_sse(obs.detach(),action,next_obs.detach()))
 
         if self.reward_free:
             # freeze successor features at finetuning phase
-            metrics.update(self.update_aps(task, next_obs, step))
+            metrics.update(self.update_aps(task, obs,action,next_obs, step))
 
             with torch.no_grad():
                 intr_ent_reward, intr_sf_reward = self.compute_intr_reward(
-                    task, next_obs, step)
+                    task, obs, action, next_obs, step)
                 intr_reward = intr_ent_reward + intr_sf_reward
 
             if self.use_tb or self.use_wandb:
                 metrics['intr_reward'] = intr_reward.mean().item()
                 metrics['intr_ent_reward'] = intr_ent_reward.mean().item()
                 metrics['intr_sf_reward'] = intr_sf_reward.mean().item()
-
-            # TODO cal reward according to reture @ diayn_smerl
-            # accept = episode_return >= self.smerl_target - self.smerl_margin
-            reward = intr_reward #*accept*self.balancing_factor + extr_reward
+            
+            reward = intr_reward
 
         else:
             reward = extr_reward
@@ -281,42 +363,55 @@ class APSAgent(DDPGAgent):
             metrics['extr_reward'] = extr_reward.mean().item()
             metrics['batch_reward'] = reward.mean().item()
 
-        if not self.update_encoder:
-            obs = obs.detach()
-            next_obs = next_obs.detach()
+        # if not self.update_encoder:
+        obs = obs.detach()
+        next_obs = next_obs.detach()
+
+        metrics.update(
+            self.update_critic_goal(obs, action, extr_reward, discount,
+                               next_obs, task, step))
 
         # extend observations with task
-        obs = torch.cat([obs, task], dim=1)
-        next_obs = torch.cat([next_obs, task], dim=1)
+        # f_obs = torch.cat([f_obs, task], dim=1)
+        # f_next_obs = torch.cat([f_next_obs, task], dim=1)
 
         # update critic
         metrics.update(
-            self.update_critic(obs.detach(), action, reward, discount,
-                               next_obs.detach(), task, step))
+            self.update_critic(obs, action, intr_reward, discount,
+                               next_obs, task, step))
 
         # update actor
-        metrics.update(self.update_actor(obs.detach(), task, step))
+        metrics.update(self.update_actor(obs, task, step))
 
         # update critic target
         utils.soft_update_params(self.critic, self.critic_target,
+                                 self.critic_target_tau)
+        utils.soft_update_params(self.critic_goal, self.critic_goal_target,
                                  self.critic_target_tau)
 
         return metrics
 
     @torch.no_grad()
     def regress_meta(self, replay_loader, step):
-        obs, reward = [], []
+        obs, action, reward,next_obs = [], [],[], []
         batch_size = 0
         while batch_size < self.lstsq_batch_size:
             batch = replay_loader.sample(self.cfg.batch_size)
-            batch_obs, _, batch_reward, *_ = utils.to_torch(batch, self.device)
+            #obs, action, extr_reward, discount, next_obs
+            batch_obs, batch_action, batch_reward, _, batch_next_obs = utils.to_torch(batch, self.device)
             obs.append(batch_obs)
+            action.append(batch_action)
             reward.append(batch_reward)
+            next_obs.append(batch_next_obs)
             batch_size += batch_obs.size(0)
         obs, reward = torch.cat(obs, 0), torch.cat(reward, 0)
+        action, next_obs = torch.cat(action, 0), torch.cat(next_obs, 0)
 
         obs = self.aug_and_encode(obs)
-        rep = self.aps(obs)
+        next_obs = self.aug_and_encode(next_obs)
+
+        _in = torch.cat([obs, action, next_obs], dim=1)
+        rep = self.aps(_in)
         task = torch.linalg.lstsq(reward, rep)[0][:rep.size(1), :][0]
         task = task / torch.norm(task)
         task = task.cpu().numpy()
@@ -330,30 +425,62 @@ class APSAgent(DDPGAgent):
     @torch.no_grad()
     def infer_meta(self, replay_loader: ReplayBuffer) -> MetaDict:
         obs_list, reward_list = [], []
+        action_list, next_obs_list = [], []
         batch_size = 0
         while batch_size < self.cfg.num_inference_steps:
             batch = replay_loader.sample(self.cfg.batch_size)
             batch = batch.to(self.cfg.device)
-            obs_list.append(batch.next_obs)
+            obs_list.append(batch.obs)
             reward_list.append(batch.reward)
+            next_obs_list.append(batch.next_obs)
+            action_list.append(batch.action)
             batch_size += batch.next_obs.size(0)
         obs, reward = torch.cat(obs_list, 0), torch.cat(reward_list, 0)  # type: ignore
         obs, reward = obs[:self.cfg.num_inference_steps], reward[:self.cfg.num_inference_steps]
-        return self.infer_meta_from_obs_and_rewards(obs, reward)
+        next_obs, action = torch.cat(next_obs_list, 0), torch.cat(action_list, 0)  # type: ignore
+        next_obs, action = next_obs[:self.cfg.num_inference_steps], action[:self.cfg.num_inference_steps]
+        return self.infer_meta_from_obs_and_rewards(obs, action, reward,next_obs)
 
     @torch.no_grad()
-    def infer_meta_from_obs_and_rewards(self, obs: torch.Tensor, reward: torch.Tensor) -> MetaDict:
-        # print('max reward: ', reward.max().cpu().item())
-        # print('99 percentile: ', torch.quantile(reward, 0.99).cpu().item())
-        # print('median reward: ', reward.median().cpu().item())
-        # print('min reward: ', reward.min().cpu().item())
-        # print('mean reward: ', reward.mean().cpu().item())
-        # print('num reward: ', reward.shape[0])
+    def infer_meta_from_obs_and_rewards(self, obs: torch.Tensor, 
+                                        action: torch.Tensor, 
+                                        reward: torch.Tensor,
+                                        next_obs: torch.Tensor,
+                                        obs_mask: tp.Optional[torch.Tensor]=None,
+                                        next_obs_mask: tp.Optional[torch.Tensor]=None) -> MetaDict:
+        print('max reward: ', reward.max().cpu().item())
+        print('99 percentile: ', torch.quantile(reward, 0.99).cpu().item())
+        print('median reward: ', reward.median().cpu().item())
+        print('min reward: ', reward.min().cpu().item())
+        print('mean reward: ', reward.mean().cpu().item())
+        print('num reward: ', reward.shape[0])
+        
+        
+        #cal optimility
+        angle_samples = obs[:,-4]
+        print("angle diff to goal:", angle_samples.mean().cpu().item()*180/np.pi)
+        print("max angle diff to goal:", angle_samples.max().cpu().item()*180/np.pi)
+        print("min angle diff to goal:", angle_samples.min().cpu().item()*180/np.pi)
+        
+        if obs_mask and next_obs_mask:
+            # augment and encode
+            obs = self.aug(obs)
+            obs = self.encoder(obs,obs_mask)
+            next_obs = self.aug(next_obs)
+            next_obs = self.encoder(next_obs,next_obs_mask)
+        else:
+            obs = self.aug_and_encode(obs)
+            next_obs = self.aug_and_encode(next_obs)
 
-        obs = self.aug_and_encode(obs)
-        rep = self.aps(obs)
+        _in = torch.cat([obs, action, next_obs], dim=1)
+
+        rep = self.aps(_in)
         # task = torch.linalg.lstsq(reward, rep)[0][:rep.size(1), :][0]
-        task = torch.linalg.lstsq(rep, reward)[0].squeeze()
+        result = torch.linalg.lstsq(rep, reward)
+        # task = torch.linalg.lstsq(rep, reward)[0].squeeze()
+        task = result.solution.squeeze()
+        loss = result.residuals
+        print('task infer loss: ', loss.mean().cpu().item())
         task = task / torch.norm(task)
         task = task.cpu().numpy()
         meta = OrderedDict()
@@ -362,11 +489,28 @@ class APSAgent(DDPGAgent):
         # self.solved_meta = meta
         return meta
 
+    def update_sse(self,obs,action,next_obs):
+        metrics: tp.Dict[str, float] = {}
+
+        forward_error, backward_error = self.sse(obs,action,next_obs)
+        loss = forward_error.mean() + backward_error.mean()
+
+        self.sse_opt.zero_grad()
+        loss.backward()
+        self.sse_opt.step()
+
+        if self.use_tb or self.use_wandb:
+            metrics['sse_loss'] = loss.item()
+
+        return metrics
+    
     def update_critic(self, obs, action, reward, discount, next_obs, task,
                       step) -> Dict[str, Any]:
         """diff is critic takes task as input"""
         metrics: tp.Dict[str, float] = {}
-        # print(obs.shape) -> torch.Size([1024, 4112])
+        
+        obs = torch.cat([obs, task], dim=1)
+        next_obs = torch.cat([next_obs, task], dim=1)
 
         with torch.no_grad():
             stddev = utils.schedule(self.stddev_schedule, step)
@@ -376,6 +520,7 @@ class APSAgent(DDPGAgent):
                                                       task)
             target_V = torch.min(target_Q1, target_Q2)
             target_Q = reward + (discount * target_V)
+
         # print(action.shape) -> torch.Size([1024, 1])? why?
         Q1, Q2 = self.critic(obs, action, task)
         critic_loss = F.mse_loss(Q1, target_Q) + F.mse_loss(Q2, target_Q)
@@ -390,27 +535,54 @@ class APSAgent(DDPGAgent):
         self.critic_opt.zero_grad(set_to_none=True)
         critic_loss.backward()
         self.critic_opt.step()
+
         return metrics
     
-    def update_lagrange(self,replay_loader: ReplayBuffer, step: int)->Dict[str,Any]:
-        obs_init, episode_returns = replay_loader.sample_recent(self.cfg.lagrange_update_sample_num)
-        
-        obs_init = torch.as_tensor(obs_init, device=self.device)
-        obs_init = self.aug_and_encode(obs_init).detach()
-        stddev = utils.schedule(self.stddev_schedule, step)
-        action_base_dist = self.base_model.actor(obs_init, stddev)
-        action_base = action_base_dist.mean.detach()
-        Q_init_1, Q_init_2 = self.base_model.critic(obs_init, action_base)
-        Q_init = torch.min(Q_init_1, Q_init_2)
-        cost_limit = -Q_init.mean().cpu().item()*self.cfg.constrain_relaxation_alpha
-        cost = -np.mean(episode_returns)
-        self.lagrange.update_lagrange_multiplier(cost,cost_limit)
+    def update_critic_goal(self, obs, action, reward, discount, next_obs, task,
+                      step) -> Dict[str, Any]:
+        """diff is critic takes task as input"""
         metrics: tp.Dict[str, float] = {}
-        # print(episode_returns,cost_limit)
+        # print(obs.shape) -> torch.Size([1024, 4112])
+
+        with torch.no_grad():
+            stddev = utils.schedule(self.stddev_schedule, step)
+            dist = self.actor(torch.cat([next_obs, task], dim=1), stddev)
+            next_action = dist.sample(clip=self.stddev_clip)
+
+            target_goal_Q1, target_goal_Q2 = self.critic_goal_target(next_obs, next_action)
+            target_goal_V = torch.min(target_goal_Q1, target_goal_Q2)
+            target_goal_Q = reward + (discount * target_goal_V)
+
+            if step % self.update_lagrange_every_steps ==0 and self.cfg.use_constraint:
+                action_base_dist = self.base_model.actor(obs, stddev)
+                action_base = action_base_dist.mean.detach()
+                Q_base_1, Q_base_2 = self.base_model.critic(obs, action_base)
+                Q_base = torch.min(Q_base_1, Q_base_2)
+
+                cost_limit = -Q_base.mean().cpu().item()*self.cfg.optimality_ratio
+                
+                cost = -target_goal_Q.mean().item() 
+                self.lagrange.update_lagrange_multiplier(cost,cost_limit)
+                self.balancing_factor = self.lagrange.lagrangian_multiplier.to(self.cfg.device)
+                if self.use_tb or self.use_wandb:
+                    metrics['lagrange_multiplier'] = self.lagrange.lagrangian_multiplier
+                    metrics['cost'] = cost
+                    metrics['cost_limit'] = cost_limit
+
+
+        Q_goal_1, Q_goal_2 = self.critic_goal(obs, action)
+        critic_goal_loss = F.mse_loss(Q_goal_1, target_goal_Q) + F.mse_loss(Q_goal_2, target_goal_Q)
+
         if self.use_tb or self.use_wandb:
-            metrics['lagrange_multiplier'] = self.lagrange.lagrangian_multiplier
-            metrics['cost'] = cost
-            metrics['cost_limit'] = cost_limit
+            metrics['critic_goal_target_q'] = target_goal_Q.mean().item()
+            metrics['critic_goal_q1'] = Q_goal_1.mean().item()
+            metrics['critic_goal_q2'] = Q_goal_2.mean().item()
+            metrics['critic_goal_loss'] = critic_goal_loss.item()
+
+        # optimize critic
+        self.critic_goal_opt.zero_grad(set_to_none=True)
+        critic_goal_loss.backward()
+        self.critic_goal_opt.step()
 
         return metrics
 
@@ -418,25 +590,17 @@ class APSAgent(DDPGAgent):
         """diff is critic takes task as input"""
         metrics: tp.Dict[str, float] = {}
 
+        obs_z = torch.cat([obs, task], dim=1)
         stddev = utils.schedule(self.stddev_schedule, step)
-        dist = self.actor(obs, stddev)
+        dist = self.actor(obs_z, stddev)
         action = dist.sample(clip=self.stddev_clip)
         log_prob = dist.log_prob(action).sum(-1, keepdim=True)
-        Q1, Q2 = self.critic(obs, action, task)
+        Q1, Q2 = self.critic(obs_z, action, task)
         Q = torch.min(Q1, Q2)
+        Q_goal_1, Q_goal_2 = self.critic_goal(obs, action)
+        Q_goal = torch.min(Q_goal_1, Q_goal_2)
 
-        # TODO cal lagrangian 
-        base_obs = obs[...,:-self.cfg.sf_dim]
-        # action_base_dist = self.base_model.actor(base_obs, stddev)
-        # action_base = action_base_dist.mean.detach()
-        # action_base = self.base_model.act(obs[...,:-self.cfg.sf_dim],meta=self.base_model_meta,step=step,eval_mode=True)
-        Q_base_1, Q_base_2 = self.base_model.critic(base_obs, action)
-        Q_base = torch.min(Q_base_1, Q_base_2)
-        
-
-        Q = (Q+self.lagrange.lagrangian_multiplier*Q_base)/(1+self.lagrange.lagrangian_multiplier)
-
-        actor_loss = -Q.mean()
+        actor_loss = (-Q.mean()-self.balancing_factor*Q_goal.mean())/(1+self.balancing_factor)
 
         # optimize actor
         self.actor_opt.zero_grad(set_to_none=True)

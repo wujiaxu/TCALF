@@ -19,7 +19,7 @@ from controllable_navi.dmc import TimeStep
 from controllable_navi.in_memory_replay_buffer import ReplayBuffer
 from controllable_navi import utils
 from .fb_modules import mlp
-from controllable_navi.agent.encoders import MultiModalEncoder,EncoderConfig
+from controllable_navi.agent.encoders import MultiModalEncoder,MultiAgentMultiModalEncoder,EncoderConfig
 from controllable_navi.agent.sequence_encoders import SequenceEncoder,SequenceEncoderConfig
 MetaDict = tp.Mapping[str, np.ndarray]
 
@@ -145,7 +145,7 @@ class Critic(nn.Module):
 
 
 class DDPGAgent:
-    encoder: tp.Union[SequenceEncoder, nn.Identity, MultiModalEncoder]
+    encoder: tp.Union[SequenceEncoder, nn.Identity, MultiModalEncoder,MultiAgentMultiModalEncoder]
     aug: tp.Union[utils.RandomShiftsAug, nn.Identity]
     # pylint: disable=unused-argument
     def __init__(self, meta_dim: int = 0, **kwargs: tp.Any) -> None:
@@ -156,17 +156,21 @@ class DDPGAgent:
             kwargs = {x: y for x, y in kwargs.items() if x in cfg_fields}
         cfg = DDPGAgentConfig(**kwargs)
         self.cfg = cfg
-        self.action_dim = cfg.action_shape[0]
+        self.action_dim = cfg.action_shape[0] if len(cfg.action_shape)==1 else cfg.action_shape[0]*cfg.action_shape[1]
+        self.agent_num = 1 if len(cfg.action_shape)==1 else cfg.action_shape[0]
         self.solved_meta = None
         # self.update_encoder = update_encoder  # used in subclasses
-        _shape_total = 0
+        self._shape_total = 0
         for compo_name in cfg.obs_shape.keys():
             shape,dim = cfg.obs_shape[compo_name]
-            _shape_total+=dim
+            self._shape_total+=dim
         if 'toy' in cfg.obs_type and not cfg.use_sequence:
             self.aug = nn.Identity()
             self.encoder = nn.Identity()
-            self.obs_dim = _shape_total + meta_dim
+            self.obs_dim = self._shape_total + meta_dim
+        elif self.agent_num>1:
+            self.aug = nn.Identity()
+            self.encoder = MultiAgentMultiModalEncoder(cfg.obs_shape,[512,512],cfg.encoder_config) 
         else:
             self.aug = nn.Identity()
             self.encoder = MultiModalEncoder(cfg.obs_shape,cfg.encoder_config) 
@@ -175,7 +179,7 @@ class DDPGAgent:
             self.obs_dim = self.encoder.repr_dim + meta_dim
         # for sequence input case
         if cfg.use_sequence:
-            self.encoder = SequenceEncoder(_shape_total, self.encoder,cfg.sequence_encoder_config).to(cfg.device)
+            self.encoder = SequenceEncoder(self._shape_total, self.encoder,cfg.sequence_encoder_config).to(cfg.device)
             
         self.actor = Actor(cfg.obs_type, self.obs_dim, self.action_dim,
                            cfg.feature_dim, cfg.hidden_dim).to(cfg.device)
@@ -243,6 +247,39 @@ class DDPGAgent:
         replay_loader: tp.Optional[ReplayBuffer] = None
     ) -> MetaDict:
         return meta
+    
+    def get_value(self, obs, meta,step) -> tp.Tuple[np.ndarray,np.ndarray]:
+        if self.cfg.use_sequence:
+            seq,mask = obs
+            seq = torch.as_tensor(seq, device=self.device).unsqueeze(0)
+            mask = torch.as_tensor(mask, device=self.device).unsqueeze(0)
+            h = self.encoder(seq,mask)
+        else:
+            obs = torch.as_tensor(obs, device=self.device).unsqueeze(0)
+            h = self.encoder(obs)
+        inputs = [h]
+        for value in meta.values():
+            value = torch.as_tensor(value, device=self.device).unsqueeze(0)
+            inputs.append(value)
+        inpt = torch.cat(inputs, dim=-1)
+        inpt_array = inpt.repeat(5, 1)
+        #assert obs.shape[-1] == self.obs_shape[-1]
+        # stddev = utils.schedule(self.stddev_schedule, step)
+        # dist = self.actor(inpt, stddev)
+        
+        # action = dist.mean
+        # action templet
+        action = torch.tensor([[0.99,-0.9],
+                               [0.99,-0.5],
+                               [0.99,0.],
+                               [0.99,0.5],
+                               [0.99,0.9]],device=self.device,dtype=torch.float32)
+
+
+        Q1, Q2 = self.critic(inpt_array, action)
+        V = torch.min(Q1, Q2)
+
+        return V.cpu().numpy(),action.cpu().numpy()
 
     def act(self, obs, meta, step, eval_mode) -> np.ndarray:
         obs = torch.as_tensor(obs, device=self.device).unsqueeze(0)

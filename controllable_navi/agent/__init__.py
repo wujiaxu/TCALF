@@ -2,12 +2,13 @@ from .ddpg import DDPGAgent as DDPGAgent
 from .ddpg import DDPGAgentConfig as DDPGAgentConfig
 from .fb_ddpg import FBDDPGAgent as FBDDPGAgent
 # from .crowd_aps import APSAgent as APSAgent
-from .GD_aps import APSAgent as APSAgent
+# from .GD_aps import APSAgent as APSAgent
+from .C_aps import APSAgent as APSAgent
 from .ddpg import MetaDict as MetaDict
 
 #TODO
-# from .ppo import PPOAgent as PPOAgent
-# from .ppo import PPOAgentConfig as PPOAgentConfig
+from .ppo import PPOAgent as PPOAgent
+from .ppo import PPOAgentConfig as PPOAgentConfig
 # from .GD_ppo_aps import PPOAPSAgent as PPOAPSAgent
 
 

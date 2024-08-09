@@ -33,7 +33,7 @@ class VecEnv(ABC):
     """
     closed = False
     viewer = None
-
+    agent_nums:list
     metadata = {
         'render.modes': ['human', 'rgb_array']
     }
@@ -148,6 +148,7 @@ class VecEnvWrapper(VecEnv):
 
     def __init__(self, venv, observation_space=None, action_space=None):
         self.venv = venv
+        self.agent_nums = venv.agent_nums
         super().__init__(num_envs=venv.num_envs,
                         observation_space=observation_space or venv.observation_space,
                         action_space=action_space or venv.action_space)

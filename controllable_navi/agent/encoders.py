@@ -168,3 +168,74 @@ class MultiModalEncoder(nn.Module):
             start = input_size
         h = torch.cat(hs, dim=-1)
         return h
+    
+class MultiAgentMultiModalEncoder(nn.Module):
+    def __init__(self, obs_shape,mlp_pre_pool_dims,cfg:EncoderConfig) -> None:
+        super().__init__()
+        self.sub_encoders = {}
+        self.obs_shape_dict = obs_shape
+        self.repr_dim = 0
+        self.max_agent_num = 0
+        for name in self.obs_shape_dict.keys():
+            input_shape,input_size = self.obs_shape_dict[name]
+            # input_shape = (agent_num, input_shape)
+            self.max_agent_num = input_shape[0]
+            if 'scan' in name:
+                self.sub_encoders[name]=ScanEncoder(input_shape[1:],cfg.scan_encoder)
+            else:
+                self.sub_encoders[name]=StateEncoder(input_shape[1:],cfg.state_encoder)
+            self.repr_dim += self.sub_encoders[name].repr_dim
+        mlp_pre_pool_dims = [self.repr_dim]+mlp_pre_pool_dims
+        self.mlp_pre_pool = make_mlp(mlp_pre_pool_dims)
+        self.repr_dim = mlp_pre_pool_dims[-1]
+    
+    def parameters(self, recurse: bool = True) -> tp.Iterator[nn.Parameter]:
+        for name, subnet in self.sub_encoders.items():
+            for item in subnet.parameters():
+                yield item
+    
+    def to_device(self,device):
+        for name in self.obs_shape_dict.keys():
+            self.sub_encoders[name].to(device)
+
+    def forward(self,x):
+        """
+        x: batch_size X multi_state_dim
+        """
+        batch_size,_ = x.shape()
+        x = x.reshape(batch_size*self.max_agent_num,-1)
+
+        # Step 1: Check for non-zero rows
+        active_agent_mask = torch.any(x != 0, dim=-1)
+        
+        # Step 2: Create a binary mask
+        active_agent_mask = active_agent_mask.float()  # Optionally convert to float if needed
+             
+        start = 0
+        hs = []
+        for name in self.obs_shape_dict.keys():
+            input_shape,input_size = self.obs_shape_dict[name]
+            in_ = x[...,start:start+input_size]
+            hs.append(self.sub_encoders[name](in_))
+            start = input_size
+        h = torch.cat(hs, dim=-1)
+        h = self.mlp_pre_pool(h)
+        h = h*active_agent_mask
+        h = h.reshape(batch_size,self.max_agent_num,-1)
+        h = h.max(1)[0]
+        
+        return h
+    
+def make_mlp(dim_list, activation='relu', batch_norm=True, dropout=0):
+    layers = []
+    for dim_in, dim_out in zip(dim_list[:-1], dim_list[1:]):
+        layers.append(nn.Linear(dim_in, dim_out))
+        if batch_norm:
+            layers.append(nn.BatchNorm1d(dim_out))
+        if activation == 'relu':
+            layers.append(nn.ReLU())
+        elif activation == 'leakyrelu':
+            layers.append(nn.LeakyReLU())
+        if dropout > 0:
+            layers.append(nn.Dropout(p=dropout))
+    return nn.Sequential(*layers)

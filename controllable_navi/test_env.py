@@ -33,7 +33,7 @@ def get_random_human_num(max_human_num,nenv):
 nenv=32
 human_nums = get_random_human_num(5,nenv)
 print(sum(human_nums))
-envs = make_vec_envs(cfg,1,nenv,0.9,'PointGoalNavi',human_nums,0.99,"time_aware_raw_scan",50,"cpu",wrap_pytorch=False)
+envs = make_vec_envs(cfg,1,nenv,0.9,'PointGoalNavi','train',human_nums,0.99,"time_aware_raw_scan",50,"cpu",wrap_pytorch=False)
 cfg.max_robot_num = 5
 actions = [np.ones((human_num,2))*np.random.random() for human_num in human_nums]
 obs = envs.reset()

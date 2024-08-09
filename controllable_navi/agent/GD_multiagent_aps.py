@@ -17,20 +17,19 @@ from hydra.core.config_store import ConfigStore
 import omegaconf
 
 from controllable_navi.dmc import TimeStep
-from .ddpg import DDPGAgent, MetaDict, DDPGAgentConfig,Actor,Critic
+from .ddpg import DDPGAgent, MetaDict, DDPGAgentConfig,Critic
 from controllable_navi.in_memory_replay_buffer import ReplayBuffer
 from typing import Any, Dict, Tuple
 from .crowd_aps import CriticSF,APS
 from controllable_navi.agent.lagrange import Lagrange
-from torch.utils.tensorboard import SummaryWriter
 
 # TODO(HL): how to include GPI for continuous domain?
 
 
 @dataclasses.dataclass
-class GD_APSAgentConfig(DDPGAgentConfig):
-    _target_: str = "controllable_navi.agent.GD_aps.APSAgent" 
-    name: str = "gd_aps"
+class GD_MULTIAGENT_APSAgentConfig(DDPGAgentConfig):
+    _target_: str = "controllable_navi.agent.GD_multiagent_aps.APSAgent" 
+    name: str = "gd_multiagent_aps"
     update_encoder: bool = omegaconf.II("update_encoder")
     sf_dim: int = 5
     update_task_every_step: int = 5
@@ -58,8 +57,48 @@ class GD_APSAgentConfig(DDPGAgentConfig):
     sse_dim: int = 128
 
 cs = ConfigStore.instance()
-cs.store(group="agent", name="gd_aps", node=GD_APSAgentConfig)
+cs.store(group="agent", name="gd_multiagent_aps", node=GD_MULTIAGENT_APSAgentConfig)
 
+class Actor(nn.Module):
+    def __init__(self, obs_type, obs_dim, action_dim, feature_dim, hidden_dim) -> None:
+        super().__init__()
+
+        feature_dim = feature_dim if obs_type == 'pixels' else hidden_dim
+
+        self.trunk = nn.Sequential(nn.Linear(obs_dim, feature_dim),
+                                   nn.LayerNorm(feature_dim), nn.Tanh())
+
+        policy_layers = []
+        policy_layers += [
+            nn.Linear(feature_dim, hidden_dim),
+            nn.ReLU(inplace=True)
+        ]
+        # add additional hidden layer for pixels
+        if obs_type == 'pixels':
+            policy_layers += [
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(inplace=True)
+            ]
+        policy_layers += [nn.Linear(hidden_dim, action_dim)]
+
+        self.policy = nn.Sequential(*policy_layers)
+
+        self.apply(utils.weight_init)
+
+    def forward(self, obs, std) -> utils.TruncatedNormal:
+        h = self.trunk(obs)
+
+        mu = self.policy(h)
+        if torch.sum(torch.isnan(mu)):
+            print("mu")
+            raise ValueError
+        
+        mu = torch.tanh(mu)
+        std = torch.ones_like(mu) * std
+
+        dist = utils.TruncatedNormal(mu, std)
+        return dist
+    
 class ICM(nn.Module):
     # inverse dynamic presentation for embedding obs to controllable state
     """
@@ -108,12 +147,12 @@ class ICM(nn.Module):
 class APSAgent(DDPGAgent):
     def __init__(self, **kwargs: tp.Any) -> None:
         
-        cfg = GD_APSAgentConfig(**kwargs)
+        cfg = GD_MULTIAGENT_APSAgentConfig(**kwargs)
 
         # create actor and critic
         # increase obs shape to include task dim (through meta_dim)
         super().__init__(**kwargs, meta_dim=cfg.sf_dim)
-        self.cfg: GD_APSAgentConfig = cfg  # override base ddpg cfg type
+        self.cfg: GD_MULTIAGENT_APSAgentConfig = cfg  # override base ddpg cfg type
         
         if self.cfg.use_self_supervised_encoder:
             self.sse_dim = self.cfg.sse_dim
@@ -179,27 +218,6 @@ class APSAgent(DDPGAgent):
         self.critic_goal_target.train()
         if self.cfg.use_self_supervised_encoder:
             self.sse.train()
-
-    #TODO debug
-    """
-    RuntimeError: Tracer cannot infer type of TruncatedNormal(loc: torch.Size([1, 2]), scale: torch.Size([1, 2]))
-    :Only tensors and (possibly nested) tuples of tensors, lists, or dictsare supported as inputs or outputs of traced functions, 
-    but instead got value of type TruncatedNormal.
-    """
-    def add_to_tb(self,writer:SummaryWriter)->None:
-        dummy_input = torch.randn(1, self.sse_dim + self.sf_dim).to(self.cfg.device)
-        writer.add_graph(self.actor,(dummy_input,dummy_input[:,:1]))
-        writer.add_graph(self.critic,(dummy_input,dummy_input[:,:2]))
-        writer.add_graph(self.critic_target,(dummy_input,dummy_input[:,:2]))
-        dummy_input = torch.randn(1, self.sse_dim).to(self.cfg.device)
-        writer.add_graph(self.critic_goal,(dummy_input,dummy_input[:,:2]))
-        writer.add_graph(self.critic_goal_target,(dummy_input,dummy_input[:,:2]))
-        dummy_input = torch.randn(1,self.sse_dim*2+self.action_dim).to(self.cfg.device)
-        writer.add_graph(self.aps,dummy_input)
-        if self.cfg.use_self_supervised_encoder:
-            dummy_input = torch.randn(1,self.obs_dim - self.sf_dim).to(self.cfg.device)
-            writer.add_graph(self.sse,dummy_input)
-        return 
 
     def act(self, obs, meta, step, eval_mode) -> np.ndarray:
         if self.cfg.use_sequence:

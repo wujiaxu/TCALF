@@ -65,6 +65,7 @@ class Config:
     agent: tp.Any
     crowd_sim: tp.Any 
     max_episode_length:int = 50
+    homogeneous:bool=True
     # misc
     seed: int = 11
     device: str = "cuda"
@@ -362,7 +363,9 @@ class BaseWorkspace(tp.Generic[C]):
                 for i in range(robot_num):
                     if custom_reward is None:
                         meta_random = _init_eval_meta(self)
-                    metas.append(meta_random)
+                        metas.append(meta_random)
+                    else:
+                        metas.append(meta)
             total_reward = [0.0]*robot_num 
             self.video_recorder.init(self.eval_env, enabled=True) #enabled=(episode == 0) force the recorder only save episode 0
             while not all([ts.last() for ts in time_step_multi]):
