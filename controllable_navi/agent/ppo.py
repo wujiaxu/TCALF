@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from hydra.core.config_store import ConfigStore
 import omegaconf
 
-from controllable_navi.storage import DiscrimRolloutStorage
+from TCALF.robust_navi.common.storage import DiscrimRolloutStorage
 from controllable_navi import utils
 from .crowd_aps import APS
 from controllable_navi.agent.encoders import MultiModalEncoder,EncoderConfig

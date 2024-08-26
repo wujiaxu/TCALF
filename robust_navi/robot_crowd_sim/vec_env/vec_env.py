@@ -105,7 +105,7 @@ class VecEnv(ABC):
         self.step_async(actions)
         return self.step_wait()
 
-    def render(self, mode='rgb_array'):
+    def render(self, mode='return_rgb'):
         # imgs = self.get_images()
         # bigimg = tile_images(imgs)
         bigimgs = self.get_images()
@@ -114,7 +114,7 @@ class VecEnv(ABC):
             # self.get_viewer().imshow(bigimgs)
             # return self.get_viewer().isopen
             raise NotImplementedError
-        elif mode == 'rgb_array':
+        elif mode == 'return_rgb':
             return bigimgs
         else:
             raise NotImplementedError
