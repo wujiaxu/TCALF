@@ -98,7 +98,7 @@ class PPO():
         value_loss_epoch = 0
         action_loss_epoch = 0
         dist_entropy_epoch = 0
-
+        value_sum = 0
 
         for e in range(self.ppo_epoch):
             if self.actor_critic.is_recurrent:
@@ -122,10 +122,18 @@ class PPO():
                 ) = sample
 
                 # Reshape to do in a single forward pass for all steps
-                values, action_log_probs, dist_entropy, _ = self.actor_critic.evaluate_actions(
-                    obs_batch, recurrent_hidden_states_batch, masks_batch,
-                    actions_batch)
+                (
+                    values, 
+                    action_log_probs, 
+                    dist_entropy, 
+                    _ 
+                ) = self.actor_critic.evaluate_actions(
+                    obs_batch, 
+                    recurrent_hidden_states_batch,
+                    actions_batch, 
+                    masks_batch)
 
+                value_sum+=values.mean().item()
                 action_loss = self._cal_action_loss(action_log_probs,old_action_log_probs_batch,adv_targ)
                 value_loss = self._cal_value_loss(return_batch,values,value_preds_batch)
 
@@ -148,6 +156,7 @@ class PPO():
         action_loss_epoch /= num_updates
         dist_entropy_epoch /= num_updates
 
+        metrics["mean_value"] = value_sum/num_updates
         metrics["value_loss"] = value_loss_epoch
         metrics["action_loss"] = action_loss_epoch
         metrics["action_entropy"] = dist_entropy_epoch

@@ -86,7 +86,6 @@ class ScanEncoder(nn.Module):
         self.cfg = cfg
         self.input_shape = input_shape
         assert len(input_shape) == 1
-        
         input_channels = 1
         # First convolutional layer
         self.conv1 = nn.Conv1d(in_channels=input_channels, 
@@ -138,34 +137,19 @@ class ScanEncoder(nn.Module):
 class MultiModalEncoder(nn.Module):
     def __init__(self, obs_shape,cfg:EncoderConfig) -> None:
         super().__init__()
-        self.sub_encoders = {}
-        self.obs_shape_dict = obs_shape
-        self.repr_dim = 0
-        for name in self.obs_shape_dict.keys():
-            input_shape,input_size = self.obs_shape_dict[name]
-            if 'scan' in name:
-                self.sub_encoders[name]=ScanEncoder(input_shape,cfg.scan_encoder)
-            else:
-                self.sub_encoders[name]=StateEncoder(input_shape,cfg.state_encoder)
-            self.repr_dim += self.sub_encoders[name].repr_dim
-    
-    def parameters(self, recurse: bool = True) -> tp.Iterator[nn.Parameter]:
-        for name, subnet in self.sub_encoders.items():
-            for item in subnet.parameters():
-                yield item
-    
-    def to_device(self,device):
-        for name in self.obs_shape_dict.keys():
-            self.sub_encoders[name].to(device)
+        robot_state_shape = obs_shape["robot_state"]
+        robot_scan_shape = obs_shape["robot_scan"]
+
+        self.scan_encoder=ScanEncoder(robot_scan_shape,cfg.scan_encoder)
+        self.state_encoder=StateEncoder(robot_state_shape,cfg.state_encoder)
+        self.repr_dim = self.scan_encoder.repr_dim+self.state_encoder.repr_dim
 
     def forward(self,x):
-        start = 0
+        robot_state = x["robot_state"]
+        robot_scan = x["robot_scan"]
         hs = []
-        for name in self.obs_shape_dict.keys():
-            input_shape,input_size = self.obs_shape_dict[name]
-            in_ = x[...,start:start+input_size]
-            hs.append(self.sub_encoders[name](in_))
-            start = input_size
+        hs.append(self.state_encoder(robot_state))
+        hs.append(self.scan_encoder(robot_scan))
         h = torch.cat(hs, dim=-1)
         return h
     

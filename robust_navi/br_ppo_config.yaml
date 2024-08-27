@@ -1,7 +1,7 @@
 defaults:
   - _self_
   - workspace_config
-  - agent: ppo
+  - agent: scan_ppo
   - crowd_policy: diverse_recurrent_ppo
   - crowd_sim_env: RobotCrowdSim
   - override hydra/launcher: submitit_slurm

@@ -216,7 +216,12 @@ class RobotCrowdSim:
         if robot_discount!=0 and human_discount==0:
             self._reset_crowd(human_human_collision)
 
-        return observation, (robot_reward, crowd_reward), (robot_discount,human_discount), (info,crowd_info)
+        return (
+            observation, 
+            (robot_reward, crowd_reward), 
+            (robot_discount,human_discount), 
+            (info,crowd_info)
+        )
     
     def observation_spec(self,):
         return self.observation_space.shape_dict

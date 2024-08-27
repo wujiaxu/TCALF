@@ -28,10 +28,19 @@ COMMON_TRAIN_FORMAT = [('step', 'S', 'int'),('fps', 'FPS', 'float'), ('total_tim
                        ('robot average navitime','AT/R','float'),
                        ('robot navitime std','NTS/R','float'),]
 
-COMMON_EVAL_FORMAT = [('frame', 'F', 'int'), ('step', 'S', 'int'),
-                      ('episode', 'E', 'int'), ('episode_length', 'L', 'int'),
-                      ('episode_reward', 'R', 'float'),('success rate','SR','float'),
-                      ('total_time', 'T', 'time')]
+COMMON_EVAL_FORMAT = [('step', 'S', 'int'),('fps', 'FPS', 'float'), ('total_time', 'T', 'time'),
+                       ('crowd success rate','SR/C','float'),
+                       ('crowd collision rate','CR/C','float'),
+                       ('crowd timeout rate','TR/C','float'),
+                       ('crowd frequecy invasion','FI/C','float'),
+                       ('crowd average navitime','AT/C','float'),
+                       ('crowd navitime std','NTS/C','float'),
+                       ('robot success rate','SR/R','float'),
+                       ('robot collision rate','CR/R','float'),
+                       ('robot timeout rate','TR/R','float'),
+                       ('robot frequecy invasion','FI/R','float'),
+                       ('robot average navitime','AT/R','float'),
+                       ('robot navitime std','NTS/R','float'),]
 
 
 pylogger = logging.getLogger(__name__)

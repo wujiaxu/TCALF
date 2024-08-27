@@ -10,7 +10,6 @@ import torch.nn.functional as F
 
 from robust_navi.rl.ppo import PPO,PPOAgentConfig
 from robust_navi.rl.networks.actor_critic import RecurrentActorCriticPolicy
-from robust_navi.rl.networks.encoders import make_mlp
 from robust_navi.rl.networks.network_utils import init,reshapeT,zip_strict
 
 @dataclasses.dataclass

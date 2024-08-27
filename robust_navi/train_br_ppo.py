@@ -40,8 +40,10 @@ from robust_navi.common import utils
 from robust_navi.common.logger import Logger
 from robust_navi.common.video import VideoRecorder
 from robust_navi.agent.crowd_ppo import CrowdPPO
+from robust_navi.agent.scan_ppo import ScanPPO
 from robust_navi.robot_crowd_sim.vec_env.envs import make_vec_envs
 from robust_navi.robot_crowd_sim.core.simulator import RobotCrowdSim
+from robust_navi.robot_crowd_sim.core.torch_wrapper import TorchWrapper
 from robust_navi.robot_crowd_sim.core.monitor import InfoMonitor
 
 
@@ -82,7 +84,7 @@ class PretrainConfig(Config):
     # train settings
     num_train_frames: int = 20000
     # snapshot
-    eval_every_frames: int = 1000
+    eval_every_frames: int = 200
 
 
 # loaded as base_pretrain in pretrain.yaml
@@ -120,9 +122,10 @@ class BaseWorkspace(tp.Generic[C]):
         for i in range(1,cfg.max_human_num+1):
             cfg.crowd_policy.num_processes = self.human_nums.count(i)
             self.crowd_agent[i] = CrowdPPO(7+8*i,2*i,cfg.crowd_policy)
-        self.self_agent = None # TODO
+        self.self_agent = ScanPPO(self.train_env.observation_space,2,cfg.agent)
 
-        self.agent_monitor = InfoMonitor(cfg.num_processes,self.human_nums,0.25)
+        self.train_monitor = InfoMonitor(cfg.num_processes,self.human_nums,0.25)
+        self.eval_monitor = InfoMonitor(cfg.max_human_num,[i for i in range(1,cfg.max_human_num)],0.25) # not used
         # create logger
         self.logger = Logger(self.work_dir,
                              use_tb=cfg.use_tb)
@@ -135,7 +138,7 @@ class BaseWorkspace(tp.Generic[C]):
             self.train_env.action_space,
             {"observations":["robot_state","robot_scan"],
             "action":"robot_action"},
-            self.cfg.crowd_policy.hidden_dim #TODO
+            self.cfg.agent.hidden_dim 
         )
         self.rollouts_crowd_agent:tp.Dict[int,DiscrimRolloutStorage] = {}
         for i in range(1,cfg.max_human_num+1):
@@ -183,58 +186,98 @@ class BaseWorkspace(tp.Generic[C]):
                                 self.cfg.max_episode_length,
                                 self.device)
 
-    def _make_env(self,phase='train'):
+    def _make_env(self,phase='train')->tp.Dict[int,TorchWrapper]:
         envs = {}
         for human_num in range(1,self.cfg.max_human_num+1):
-            envs[human_num] = RobotCrowdSim(self.cfg.crowd_sim_env,phase,
+            envs[human_num] = TorchWrapper(RobotCrowdSim(self.cfg.crowd_sim_env,phase,
                                             human_num,
                                             1.0,
-                                            self.cfg.max_episode_length)
+                                            self.cfg.max_episode_length),
+                                            self.device)
         return envs
 
     def eval(self) -> None:
-        # self.agent.train(False) #TODO
-        step, episode = 0, 0
-        success_num = 0
-        eval_until_episode = utils.Until(self.cfg.num_eval_episodes)
-        rewards: tp.List[float] = []
+        self.self_agent.eval_mode() #TODO
+        for human_num in self.crowd_agent.keys():
+            self.crowd_agent[human_num].eval_mode()
 
-        while eval_until_episode(episode):
-            # time_step_multi = self.eval_env.reset() #TODO
-            # get meta
+        self.eval_monitor.reset()
 
-            self.video_recorder.init(self.eval_env, enabled=True) #enabled=(episode == 0) force the recorder only save episode 0
-            # while not all([ts.last() for ts in time_step_multi]):
-                # act
-                # self.video_recorder.record(self.eval_env)
+        for human_num in self.eval_env.keys():
+            env = self.eval_env[human_num]
 
-                #step
-                # step += 1
-                # episode_step+=1
+            episode = 0
+            eval_until_episode = utils.Until(self.cfg.num_eval_episodes)
+            while eval_until_episode(episode):
+                # time_step_multi = self.eval_env.reset() #TODO
+                robot_obs,crowd_obs = env.reset()
+                robot_rnn_hxs = torch.zeros(1,self.cfg.agent.hidden_dim,device=self.device)
+                crowd_rnn_hxs = torch.zeros(1,self.cfg.crowd_policy.hidden_dim,device=self.device)
+                mask = torch.ones(1,device=self.device)
+                robot_done = False
+                self.video_recorder.init(self.eval_env, enabled=True) #enabled=(episode == 0) force the recorder only save episode 0
+                while not robot_done:
+                    # robot act
+                    (
+                        robot_value, 
+                        robot_action, 
+                        robot_action_log_probs, 
+                        robot_rnn_hxs
+                    ) = self.self_agent.actor_critic.act(
+                        robot_obs,
+                        robot_rnn_hxs,
+                        mask
+                    )
+                    # crowd act
+                    (
+                        value_, 
+                        crowd_action, 
+                        action_log_probs_, 
+                        crowd_rnn_hxs
+                    ) = self.crowd_agent[human_num].actor_critic.act(
+                        crowd_obs,
+                        crowd_rnn_hxs,
+                        mask
+                    )
+                    # env step
+                    # env transition
+                    (
+                        (crowd_obs, robot_obs), 
+                        (robot_rew, crowd_rew), 
+                        (robot_discount,human_discount), 
+                        (infos,crowd_infos)
+                    )= env.step(
+                        {"robot_action":copy.deepcopy(robot_action),
+                            "crowd_action":copy.deepcopy(crowd_action)}
+                        )
+                    self.video_recorder.record(env._env)
+                    self.eval_monitor.saveInfoEnv((infos,crowd_infos),human_num)
+                    if robot_discount==0:
+                        robot_done = True
 
-            # summarize episode
-            # for time_step in time_step_multi: 
-            #     # if time_step.last(): continue
-            #     success_num = success_num+1 if time_step.info.contain(ReachGoal()) else success_num #this seemly no working!! TODO debug
-            # rewards+=total_reward
-            episode += 1
-            # self.video_recorder.save(f'{self.global_step}_{episode}.mp4')
-
-        # self.agent.train(True) #TODO
+                episode += 1
+                self.video_recorder.save(f'{self.global_step}_{human_num}_{episode}.mp4')
 
         # log
-        # self.eval_rewards_history.append(float(np.mean(rewards)))
-        # with self.logger.log_and_dump_ctx(self.global_step, ty='eval') as log:
-        #     log('episode_reward', self.eval_rewards_history[-1])
-        #     if len(rewards) > 1:
-        #         log('episode_reward#std', float(np.std(rewards)))
-        #     log('episode_length', step * self.cfg.action_repeat / episode)
-        #     log('episode', self.global_episode)
-        #     log('z_correl', z_correl / episode)
-        #     log('step', self.global_step)
-        #     log('success rate', float(success_num)/total_robot_number)
-        #     if actor_success:
-        #         log('actor_sucess', float(np.mean(actor_success)))
+        with self.logger.log_and_dump_ctx(self.global_step, ty='eval') as log:
+            sr,cr,tr,fi,at,std_t = self.eval_monitor.evaluateCrowdInfo()
+            log('crowd success rate',sr)
+            log('crowd collide rate',cr)
+            log('crowd timeout rate',tr)
+            log('crowd frequecy invasion',fi)
+            log('crowd average navitime',at)
+            log('crowd navitime std',std_t)
+            sr,cr,tr,fi,at,std_t = self.eval_monitor.evaluateRobotInfo()
+            log('robot success rate',sr)
+            log('robot collide rate',cr)
+            log('robot timeout rate',tr)
+            log('robot frequecy invasion',fi)
+            log('robot average navitime',at)
+            log('robot navitime std',std_t)
+
+        self.self_agent.train_mode() #TODO
+        for human_num in self.crowd_agent.keys():
+            self.crowd_agent[human_num].train_mode()
 
     _CHECKPOINTED_KEYS = ('self_agent', 'crowd_agent', 'global_step')
 
@@ -330,7 +373,7 @@ class Workspace(BaseWorkspace[PretrainConfig]):
             metrics: tp.Dict[str,float] = {}
             for human_num in self.crowd_agent.keys():
                 self.crowd_agent[human_num].train_mode()
-            # self.self_agent.train_mode() 
+            self.self_agent.train_mode() 
 
             # step the environment for a few times
             for step in range(self.cfg.num_steps):
@@ -342,10 +385,22 @@ class Workspace(BaseWorkspace[PretrainConfig]):
                 # sample actions
                 with torch.no_grad():
 
-                    robot_action = torch.cat([
-                        torch.ones((self.cfg.num_processes,1),device=self.cfg.device),
-                        torch.zeros((self.cfg.num_processes,1),device=self.cfg.device)
-                     ],dim=-1) #TODO 
+                    rollouts_obs = {}
+                    for key in self.rollouts_self_agent.obs:
+                        rollouts_obs[key] = self.rollouts_self_agent.obs[key][step]
+                    rollouts_hidden_s = self.rollouts_self_agent.recurrent_hidden_states[step]
+                    mask = self.rollouts_self_agent.masks[step]
+                    (
+                        robot_value, 
+                        robot_action, 
+                        robot_action_log_probs, 
+                        robot_rnn_hxs
+                    ) = self.self_agent.actor_critic.act(
+                        rollouts_obs,
+                        rollouts_hidden_s,
+                        mask
+                    )
+                    
                     
                     for human_num in self.crowd_agent.keys():
                         rollouts_obs = {}
@@ -354,19 +409,19 @@ class Workspace(BaseWorkspace[PretrainConfig]):
                         rollouts_hidden_s = self.rollouts_crowd_agent[human_num].recurrent_hidden_states[step]
                         mask = self.rollouts_crowd_agent[human_num].masks[step]
                         (
-                            value, 
-                            action, 
-                            action_log_probs, 
-                            rnn_hxs
+                            value_, 
+                            action_, 
+                            action_log_probs_, 
+                            rnn_hxs_
                         ) = self.crowd_agent[human_num].actor_critic.act(
                             rollouts_obs,
                             rollouts_hidden_s,
                             mask
                         )
-                        crowd_action[human_num] = action
-                        crowd_value[human_num] = value
-                        crowd_action_log_probs[human_num] = action_log_probs
-                        crowd_rnn_hxs[human_num] = rnn_hxs
+                        crowd_action[human_num] = action_
+                        crowd_value[human_num] = value_
+                        crowd_action_log_probs[human_num] = action_log_probs_
+                        crowd_rnn_hxs[human_num] = rnn_hxs_
 
                 # env transition
                 (
@@ -380,6 +435,15 @@ class Workspace(BaseWorkspace[PretrainConfig]):
                     )
                 
                 # write to rollout storage
+                self.rollouts_self_agent.insert(
+                    robot_obs,
+                    robot_rnn_hxs,
+                    robot_action,
+                    robot_action_log_probs,
+                    robot_value,
+                    robot_rews,
+                    robot_discounts
+                )
                 for human_num in self.rollouts_crowd_agent.keys():
                     self.rollouts_crowd_agent[human_num].insert(
                         crowd_obs[human_num],
@@ -393,12 +457,22 @@ class Workspace(BaseWorkspace[PretrainConfig]):
                 
 
                 # analyze info and log episode status
-                self.agent_monitor.saveInfoVecEnv((infos,crowd_infos_dict))
+                self.train_monitor.saveInfoVecEnv((infos,crowd_infos_dict))
 
             
             # store the stepped experience to buffer
             crowd_next_value = {}
             with torch.no_grad():
+                rollouts_obs = {}
+                for key in self.rollouts_self_agent.obs:
+                    rollouts_obs[key] = self.rollouts_self_agent.obs[key][-1]
+                rollouts_hidden_s= self.rollouts_self_agent.recurrent_hidden_states[-1]
+                robot_next_value = self.self_agent.actor_critic.get_value(
+                    rollouts_obs,
+                    rollouts_hidden_s,
+                    self.rollouts_self_agent.masks[-1]
+                ).detach()
+
                 for human_num in self.rollouts_crowd_agent.keys():
                     rollouts_obs = {}
                     for key in self.rollouts_crowd_agent[human_num].obs:
@@ -411,6 +485,12 @@ class Workspace(BaseWorkspace[PretrainConfig]):
                                                             ).detach()
 
             # compute advantage and gradient, and update the network parameters
+            self.rollouts_self_agent.compute_returns(
+                robot_next_value,
+                self.cfg.agent.use_gae, 
+                self.cfg.agent.discount,
+                self.cfg.agent.gae_lambda
+            )
             for human_num in self.rollouts_crowd_agent.keys():
                 self.rollouts_crowd_agent[human_num].compute_returns(
                     crowd_next_value[human_num], 
@@ -420,6 +500,12 @@ class Workspace(BaseWorkspace[PretrainConfig]):
                     )
 
             # update
+            metrics.update(
+                self.self_agent.update(
+                    self.rollouts_self_agent
+                )
+            )
+            self.rollouts_self_agent.after_update()
             for human_num in self.crowd_agent.keys():
                 metrics.update(
                         self.crowd_agent[human_num].update(
@@ -431,28 +517,28 @@ class Workspace(BaseWorkspace[PretrainConfig]):
                 self.rollouts_crowd_agent[human_num].after_update()
             
             # try to evaluate #TODO
-            # if eval_every_step(self.global_step):
-            #     self.logger.log('eval_total_time', self.timer.total_time(),
-            #                     self.global_step)
-            #     self.phase = 'val'
-            #     self.eval()
+            if eval_every_step(self.global_step):
+                self.logger.log('eval_total_time', self.timer.total_time(),
+                                self.global_step)
+                self.phase = 'val'
+                self.eval()
 
             self.global_step += 1
             self.logger.log_metrics(metrics, self.global_step, ty='train')
             with self.logger.log_and_dump_ctx(self.global_step,
                                                       ty='train') as log:
                 elapsed_time, total_time = self.timer.reset()
-                log('fps', self.global_step / elapsed_time)#TODO fix bug
+                log('fps', self.global_step / total_time)
                 log('total_time', total_time)
                 log('step', self.global_step)
-                sr,cr,tr,fi,at,std_t = self.agent_monitor.evaluateCrowdInfo()
+                sr,cr,tr,fi,at,std_t = self.train_monitor.evaluateCrowdInfo()
                 log('crowd success rate',sr)
                 log('crowd collide rate',cr)
                 log('crowd timeout rate',tr)
                 log('crowd frequecy invasion',fi)
                 log('crowd average navitime',at)
                 log('crowd navitime std',std_t)
-                sr,cr,tr,fi,at,std_t = self.agent_monitor.evaluateRobotInfo()
+                sr,cr,tr,fi,at,std_t = self.train_monitor.evaluateRobotInfo()
                 log('robot success rate',sr)
                 log('robot collide rate',cr)
                 log('robot timeout rate',tr)

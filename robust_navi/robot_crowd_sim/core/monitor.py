@@ -8,9 +8,13 @@ class InfoMonitor:
         self._nenv = env_num
         self.human_nums = human_nums_env
         self._time_step = time_step
+        self.reset()
+
+    def reset(self):
+
         self.global_step = 0
         
-        self.robot_step = [0]*env_num
+        self.robot_step = [0]*self._nenv
         self.robot_episode = 0
         self.robot_success = 0
         self.robot_collide = 0
@@ -19,7 +23,7 @@ class InfoMonitor:
         self.robot_time = []
 
         self.crowd_step = {}
-        for human_num in human_nums_env:
+        for human_num in self.human_nums:
             if human_num not in self.crowd_step:
                 self.crowd_step[human_num] = []
             self.crowd_step[human_num].append(0)
@@ -30,6 +34,8 @@ class InfoMonitor:
         self.crowd_invasion = 0
         self.crowd_time = []
 
+        return
+    
     def evaluateRobotInfo(self):
 
         return (
@@ -52,6 +58,12 @@ class InfoMonitor:
             np.std(self.crowd_time)
         )
     
+    def saveInfoEnv(self,infos,human_num,env_ids=(0,0)):
+        robot_info, crowd_info = infos
+        robot_env_id, crowd_env_id = env_ids
+        self._readRobotInfo(robot_info,robot_env_id)
+        self._readCrowdInfo(crowd_info,human_num,crowd_env_id)
+    
     def saveInfoVecEnv(self,infos):
         robot_infos, crowd_infos_dict = infos
         self.saveRobotInfoList(robot_infos)
@@ -61,24 +73,7 @@ class InfoMonitor:
         for i, info in enumerate(infos):
             self.global_step+=1
             self.robot_step[i]+=self._time_step
-            if isinstance(info,Nothing):
-                continue
-            if isinstance(info,Discomfort):
-                self.robot_invasion+=1
-                continue
-            if isinstance(info,ReachGoal):
-                self.robot_time.append(self.robot_step[i])
-                self.robot_success+=1
-                self.robot_step[i] = 0
-            elif isinstance(info,Collision):
-                self.robot_collide+=1
-                self.robot_step[i] = 0
-            elif isinstance(info,Timeout):
-                self.robot_timeout+=1
-                self.robot_step[i] = 0
-            else:
-                raise ValueError
-            self.robot_episode+=1
+            self._readRobotInfo(info,i)
         return 
     
     def saveCrowdInfoDict(self,crowd_infos_dict):
@@ -88,22 +83,47 @@ class InfoMonitor:
             for i, info in enumerate(infos):
                 self.global_step+=1
                 self.crowd_step[human_num][i]+=self._time_step
-                if isinstance(info,Nothing):
-                    continue
-                if isinstance(info,Discomfort):
-                    self.crowd_invasion+=1
-                    continue
-                if isinstance(info,ReachGoal):
-                    self.crowd_time.append(self.crowd_step[human_num][i])
-                    self.crowd_success+=1
-                    self.crowd_step[human_num][i] = 0
-                elif isinstance(info,Collision):
-                    self.crowd_collide+=1
-                    self.crowd_step[human_num][i] = 0
-                elif isinstance(info,Timeout):
-                    self.crowd_timeout+=1
-                    self.crowd_step[human_num][i] = 0
-                else:
-                    raise ValueError
-                self.crowd_episode+=1
+                self._readCrowdInfo(info,human_num,i)
+        return
+    
+    def _readRobotInfo(self,info,env_id=0):
+        if isinstance(info,Nothing):
+            return
+        if isinstance(info,Discomfort):
+            self.robot_invasion+=1
+            return
+        if isinstance(info,ReachGoal):
+            self.robot_time.append(self.robot_step[env_id])
+            self.robot_success+=1
+            self.robot_step[env_id] = 0
+        elif isinstance(info,Collision):
+            self.robot_collide+=1
+            self.robot_step[env_id] = 0
+        elif isinstance(info,Timeout):
+            self.robot_timeout+=1
+            self.robot_step[env_id] = 0
+        else:
+            raise ValueError
+        self.robot_episode+=1
+        return
+    
+    def _readCrowdInfo(self,info,human_num,env_id):
+        if isinstance(info,Nothing):
+            return
+        if isinstance(info,Discomfort):
+            self.crowd_invasion+=1
+            return
+        if isinstance(info,ReachGoal):
+            self.crowd_time.append(self.crowd_step[human_num][env_id])
+            self.crowd_success+=1
+            self.crowd_step[human_num][env_id] = 0
+        elif isinstance(info,Collision):
+            self.crowd_collide+=1
+            self.crowd_step[human_num][env_id] = 0
+        elif isinstance(info,Timeout):
+            self.crowd_timeout+=1
+            self.crowd_step[human_num][env_id] = 0
+        else:
+            raise ValueError
+        self.crowd_episode+=1
         return
